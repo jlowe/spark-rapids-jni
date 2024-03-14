@@ -58,10 +58,16 @@ int64_t read_long(uint8_t const*& p) {
   return v;
 }
 
+uint32_t get_validity_byte_size(uint32_t num_rows) {
+  uint32_t padded_rows = ((num_rows + 63) / 64) * 64;
+  return padded_rows / 8;
+}
+
 cudf::column_view create_column_view(uint8_t const* header_ptr,
                                      uint32_t num_rows,
-                                     uint8_t const*& buffer_pos,
-                                     uint8_t const* buffer_end) {
+                                     uint8_t const* host_buffer,
+                                     uint8_t const* gpu_buffer,
+                                     uint64_t& buffer_offset) {
   // column header:
   // - 4-byte type ID
   // - 4-byte type scale
@@ -73,17 +79,28 @@ cudf::column_view create_column_view(uint8_t const* header_ptr,
   auto const dtype_id = read_int(header_ptr);
   auto const scale = read_int(header_ptr);
   auto const null_count = read_int(header_ptr);
-  void const* data = nullptr;
+  cudf::data_type dtype = cudf::jni::make_data_type(dtype_id, scale);
   cudf::bitmask_type const* null_mask = nullptr;
+  if (null_count != 0) {
+    null_mask = static_cast<cudf::bitmask_type const*>(gpu_buffer + buffer_offset);
+    buffer_offset += get_validity_byte_size(num_rows);
+  }
   std::vector<cudf::column_view> children;
+  void const* data = nullptr;
+  if (num_rows > 0 && dtype.id() == cudf::type_id::STRING || dtype.id() == cudf::type_id::LIST) {
+    // column has offsets
 
-  cudf::data_type = cudf::jni::make_data_type()
+    xxx start here, read start and end offset to calculate size
+  }
+  if (cudf::is_nested(dtype)) {
+  }
   return cudf::column_view(dtype, num_rows, data, null_mask, 0, children);
 }
 
 cudf::table_view create_table_view(uint8_t const* header_ptr,
-                                   uint8_t const*& buffer_pos,
-                                   uint8_t const* buffer_end) {
+                                   uint8_t const* host_buffer,
+                                   uint8_t const* gpu_buffer,
+                                   uint64_t& buffer_offset) {
   // table header:
   // - 4-byte magic number
   // - 2-byte version number
@@ -104,28 +121,39 @@ cudf::table_view create_table_view(uint8_t const* header_ptr,
   std::vector<cudf::column_view> column_views;
   column_views.reserve(num_columns);
   for (uint32_t i = 0; i < num_columns; ++i) {
-    column_views.emplace_back(create_column_view(header_ptr, num_rows, buffer_pos, buffer_end));
+    column_views.emplace_back(create_column_view(header_ptr, num_rows, host_buffer, gpu_buffer,
+      buffer_offset));
   }
   return cudf::table_view(column_views);
 }
 
 std::vector<cudf::table_view> create_table_views(
-    std::vector<jlong> header_addrs, std::vector<std::unique_ptr<rmm::device_buffer>> buffers) {
+    std::vector<jlong> header_addrs,
+    std::vector<jlong> host_ranges,
+    std::vector<std::unique_ptr<rmm::device_buffer>> gpu_buffers) {
   std::vector<cudf::table_view> views;
   views.reserve(header_addrs.size());
   std::size_t next_buffer_index = 0;
-  uint8_t const* buffer_pos = nullptr;
-  uint8_t const* buffer_end = buffer_pos;
+  uint8_t const* host_buffer = nullptr;
+  uint8_t const* gpu_buffer = nullptr;
+  uint64_t buffer_offset = 0;
+  uint64_t buffer_size = 0;
   for (jlong const* header_addr_ptr = header_addrs.begin();
        header_addr_ptr != header_addrs.end();
        ++header_addr_ptr) {
-    if (buffer_pos == buffer_end) {
-      buffer_pos = static_cast<uint8_t const*>(buffers[next_buffer_index]->data());
-      buffer_end = buffer_pos + buffers[next_buffer_index]->size();
+    if (buffer_offset == buffer_size) {
+      buffer_offset = 0;
+      host_buffer = reinterpret_cast<uint8_t const*>(host_ranges[next_buffer_index * 2]);
+      auto rmm_buff = gpu_buffers[next_buffer_index];
+      gpu_buffer = static_cast<uint8_t const*>(rmm_buff->data());
+      buffer_size = rmm_buff->size();
       ++next_buffer_index;
     }
     auto header_data_ptr = reinterpret_cast<uint8_t const*>(*header_addr_ptr);
-    views.emplace_back(create_table_view(header_data_ptr, buffer_pos, buffer_end));
+    views.emplace_back(create_table_view(header_data_ptr, host_buffer, gpu_buffer, buffer_offset));
+    if (buffer_offset > buffer_size) {
+      throw std::runtime_error("buffer overflow during table deserialization");
+    }
   }
   if (buffer_pos != buffer_end || next_buffer_index != buffers.size()) {
     throw std::runtime_error("error deserializing table views");
