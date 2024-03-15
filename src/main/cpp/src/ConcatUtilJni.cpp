@@ -15,6 +15,7 @@
  */
 
 #include "cudf_jni_apis.hpp"
+#include "dtype_utils.hpp"
 #include "jni_utils.hpp"
 
 #include <cudf/column/column_view.hpp>
@@ -31,11 +32,13 @@ namespace {
 std::vector<std::unique_ptr<rmm::device_buffer>> copy_ranges(std::vector<jlong> const& host_ranges) {
   std::vector<std::unique_ptr<rmm::device_buffer>> gpu_ranges;
   gpu_ranges.reserve(host_ranges.size() / 2);
-  for (jlong const* p = host_ranges.begin(); p != host_ranges.end();) {
+  for (auto p = host_ranges.begin(); p != host_ranges.end();) {
     auto host_addr = reinterpret_cast<void const*>(*p++);
     auto size = static_cast<std::size_t>(*p++);
-    gpu_ranges.emplace_back(std::make_unique(host_addr, size, cudf::get_default_stream()));
+    gpu_ranges.emplace_back(
+        std::make_unique<rmm::device_buffer>(host_addr, size, cudf::get_default_stream()));
   }
+  return gpu_ranges;
 }
 
 int32_t read_int(uint8_t const*& p) {
@@ -71,7 +74,7 @@ cudf::column_view create_column_view(uint8_t const* header_ptr,
                                      uint32_t num_rows,
                                      uint8_t const* host_buffer,
                                      uint8_t const* gpu_buffer,
-                                     uint64_t& buffer_offset) {
+                                     int64_t& buffer_offset) {
   // column header:
   // - 4-byte type ID
   // - 4-byte type scale
@@ -86,7 +89,7 @@ cudf::column_view create_column_view(uint8_t const* header_ptr,
   cudf::data_type dtype = cudf::jni::make_data_type(dtype_id, scale);
   cudf::bitmask_type const* null_mask = nullptr;
   if (null_count != 0) {
-    null_mask = static_cast<cudf::bitmask_type const*>(gpu_buffer + buffer_offset);
+    null_mask = reinterpret_cast<cudf::bitmask_type const*>(gpu_buffer + buffer_offset);
     buffer_offset += get_validity_byte_size(num_rows);
   }
   std::vector<cudf::column_view> children;
@@ -100,7 +103,7 @@ cudf::column_view create_column_view(uint8_t const* header_ptr,
         nullptr,
         0);
       auto offsets_len = (num_rows + 1) * sizeof(cudf::size_type);
-      auto host_offsets = static_cast<cudf::size_type const*>(host_buffer + buffer_offset);
+      auto host_offsets = reinterpret_cast<cudf::size_type const*>(host_buffer + buffer_offset);
       buffer_offset += align64(offsets_len);
       if (dtype.id() == cudf::type_id::STRING) {
         auto start_offset = host_offsets[0];
@@ -125,13 +128,13 @@ cudf::column_view create_column_view(uint8_t const* header_ptr,
     auto data_len = cudf::size_of(dtype) * num_rows;
     buffer_offset += align64(data_len);
   }
-  return cudf::column_view(dtype, num_rows, data, null_mask, 0, children);
+  return cudf::column_view(dtype, num_rows, data, null_mask, 0, 0, children);
 }
 
 cudf::table_view create_table_view(uint8_t const* header_ptr,
                                    uint8_t const* host_buffer,
                                    uint8_t const* gpu_buffer,
-                                   uint64_t& buffer_offset) {
+                                   int64_t& buffer_offset) {
   // table header:
   // - 4-byte magic number
   // - 2-byte version number
@@ -149,35 +152,38 @@ cudf::table_view create_table_view(uint8_t const* header_ptr,
   auto const num_columns = read_int(header_ptr);
   auto const num_rows = read_int(header_ptr);
   auto const data_len = read_long(header_ptr);
+  auto const buffer_offset_start = buffer_offset;
   std::vector<cudf::column_view> column_views;
   column_views.reserve(num_columns);
-  for (uint32_t i = 0; i < num_columns; ++i) {
+  for (int i = 0; i < num_columns; ++i) {
     column_views.emplace_back(create_column_view(header_ptr, num_rows, host_buffer, gpu_buffer,
       buffer_offset));
+  }
+  if (buffer_offset - buffer_offset_start != data_len) {
+    throw std::runtime_error("table deserialization error");
   }
   return cudf::table_view(column_views);
 }
 
 std::vector<cudf::table_view> create_table_views(
-    std::vector<jlong> header_addrs,
-    std::vector<jlong> host_ranges,
-    std::vector<std::unique_ptr<rmm::device_buffer>> gpu_buffers) {
+    std::vector<jlong> const& header_addrs,
+    std::vector<jlong> const& host_ranges,
+    std::vector<std::unique_ptr<rmm::device_buffer>> const& gpu_buffers) {
   std::vector<cudf::table_view> views;
   views.reserve(header_addrs.size());
   std::size_t next_buffer_index = 0;
   uint8_t const* host_buffer = nullptr;
   uint8_t const* gpu_buffer = nullptr;
-  uint64_t buffer_offset = 0;
-  uint64_t buffer_size = 0;
-  for (jlong const* header_addr_ptr = header_addrs.begin();
+  int64_t buffer_offset = 0;
+  int64_t buffer_size = 0;
+  for (auto header_addr_ptr = header_addrs.begin();
        header_addr_ptr != header_addrs.end();
        ++header_addr_ptr) {
     if (buffer_offset == buffer_size) {
       buffer_offset = 0;
       host_buffer = reinterpret_cast<uint8_t const*>(host_ranges[next_buffer_index * 2]);
-      auto rmm_buff = gpu_buffers[next_buffer_index];
-      gpu_buffer = static_cast<uint8_t const*>(rmm_buff->data());
-      buffer_size = rmm_buff->size();
+      gpu_buffer = static_cast<uint8_t const*>(gpu_buffers[next_buffer_index]->data());
+      buffer_size = gpu_buffers[next_buffer_index]->size();
       ++next_buffer_index;
     }
     auto header_data_ptr = reinterpret_cast<uint8_t const*>(*header_addr_ptr);
@@ -186,10 +192,12 @@ std::vector<cudf::table_view> create_table_views(
       throw std::runtime_error("buffer overflow during table deserialization");
     }
   }
-  if (buffer_pos != buffer_end || next_buffer_index != buffers.size()) {
+  if (buffer_offset != buffer_size || next_buffer_index != gpu_buffers.size()) {
     throw std::runtime_error("error deserializing table views");
   }
   return views;
+}
+
 }
 
 extern "C" {
@@ -206,8 +214,8 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ConcatUtil_concatS
     auto headers_vec = header_addrs.to_vector();
     auto ranges_vec = data_ranges.to_vector();
     auto gpu_buffers = copy_ranges(ranges_vec);
+    auto tables = create_table_views(headers_vec, ranges_vec, gpu_buffers);
     data_ranges.cancel();
-    auto tables = create_table_views(headers_vec, gpu_buffers);
     header_addrs.cancel();
     auto result = cudf::concatenate(tables);
     return cudf::jni::convert_table_for_return(env, result);
