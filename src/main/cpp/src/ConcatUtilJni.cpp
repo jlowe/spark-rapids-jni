@@ -63,6 +63,10 @@ uint32_t get_validity_byte_size(uint32_t num_rows) {
   return padded_rows / 8;
 }
 
+uint64_t align64(uint64_t offset) {
+  return ((offset + 63) / 64) * 64;
+}
+
 cudf::column_view create_column_view(uint8_t const* header_ptr,
                                      uint32_t num_rows,
                                      uint8_t const* host_buffer,
@@ -87,12 +91,39 @@ cudf::column_view create_column_view(uint8_t const* header_ptr,
   }
   std::vector<cudf::column_view> children;
   void const* data = nullptr;
-  if (num_rows > 0 && dtype.id() == cudf::type_id::STRING || dtype.id() == cudf::type_id::LIST) {
-    // column has offsets
-
-    xxx start here, read start and end offset to calculate size
-  }
-  if (cudf::is_nested(dtype)) {
+  if (dtype.id() == cudf::type_id::STRING || dtype.id() == cudf::type_id::LIST) {
+    if (num_rows > 0) {
+      children.emplace_back(
+        cudf::data_type{cudf::type_to_id<cudf::size_type>()},
+        num_rows + 1,
+        gpu_buffer + buffer_offset,
+        nullptr,
+        0);
+      auto offsets_len = (num_rows + 1) * sizeof(cudf::size_type);
+      auto host_offsets = static_cast<cudf::size_type const*>(host_buffer + buffer_offset);
+      buffer_offset += align64(offsets_len);
+      if (dtype.id() == cudf::type_id::STRING) {
+        auto start_offset = host_offsets[0];
+        auto end_offset = host_offsets[num_rows];
+        data = gpu_buffer + buffer_offset;
+        buffer_offset += align64(end_offset - start_offset);
+      }
+    }
+    if (dtype.id() == cudf::type_id::LIST) {
+      auto child_num_rows = read_int(header_ptr);
+      children.emplace_back(create_column_view(header_ptr, child_num_rows, host_buffer, gpu_buffer,
+          buffer_offset));
+    }
+  } else if (dtype.id() == cudf::type_id::STRUCT) {
+    auto num_children = read_int(header_ptr);
+    for (int child_idx = 0; child_idx < num_children; ++child_idx) {
+      children.emplace_back(create_column_view(header_ptr, num_rows, host_buffer, gpu_buffer,
+          buffer_offset));
+    }
+  } else {
+    data = gpu_buffer + buffer_offset;
+    auto data_len = cudf::size_of(dtype) * num_rows;
+    buffer_offset += align64(data_len);
   }
   return cudf::column_view(dtype, num_rows, data, null_mask, 0, children);
 }

@@ -151,6 +151,7 @@ add_library(
   spark_rapids_jni SHARED
   src/BloomFilterJni.cpp
   src/CastStringJni.cpp
+  src/ConcatUtilJni.cpp
   src/DateTimeRebaseJni.cpp
   src/DecimalUtilsJni.cpp
   src/GpuTimeZoneDBJni.cpp
