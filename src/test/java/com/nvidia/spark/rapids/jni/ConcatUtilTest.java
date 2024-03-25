@@ -61,7 +61,9 @@ public class ConcatUtilTest {
         hmb.setBytes(0, rawData, 0, rawData.length);
         hmb.setBytes(rawData.length, rawData, 0, rawData.length);
         long[] headerAddrs = new long[]{ hmb.getAddress(), hmb.getAddress() + rawData.length };
-        long[] cpuDataRanges = new long[]{ headerAddrs[0] + headerSize, headerAddrs[1] + headerSize };
+        long[] cpuDataRanges = new long[]{
+            headerAddrs[0] + headerSize, headerAddrs[0] + rawData.length,
+            headerAddrs[1] + headerSize, headerAddrs[1] + rawData.length };
         try (Table actual = ConcatUtil.concatSerializedTables(headerAddrs, cpuDataRanges)) {
           AssertUtils.assertTablesAreEqual(expected, actual);
         }

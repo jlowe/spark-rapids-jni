@@ -24,7 +24,7 @@ public class ConcatUtil {
   }
 
   public static Table concatSerializedTables(long[] headerAddrs, long[] cpuDataRanges) {
-    assert(cpuDataRanges.length > 0 && cpuDataRanges.length % 2 == 0);
+    assert(cpuDataRanges.length == 2 * headerAddrs.length);
     return new Table(concatSerialized(headerAddrs, cpuDataRanges));
   }
 
