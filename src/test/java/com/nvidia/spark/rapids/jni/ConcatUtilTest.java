@@ -25,6 +25,7 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
+import java.util.Arrays;
 
 public class ConcatUtilTest {
   @Test
@@ -43,20 +44,27 @@ public class ConcatUtilTest {
          ColumnVector emptyListString = ColumnVector.fromLists(listStringsType);
          ColumnVector emptyMap = ColumnVector.fromLists(mapType);
          ColumnVector emptyStruct = ColumnVector.fromStructs(structType);
-         Table t = new Table(emptyInt, emptyInt, emptyDouble, emptyString,
+         Table expected = new Table(emptyInt, emptyInt, emptyDouble, emptyString,
              emptyListString, emptyMap, emptyStruct)) {
       // serialize the empty table
       ByteArrayOutputStream bout = new ByteArrayOutputStream();
-      JCudfSerialization.writeToStream(t, bout, 0, 0);
+      JCudfSerialization.writeToStream(expected, bout, 0, 0);
       // compute header size
       ByteArrayInputStream bin = new ByteArrayInputStream(bout.toByteArray());
       DataInputStream din = new DataInputStream(bin);
-      JCudfSerialization.SerializedTableHeader header = new Jcu
+      JCudfSerialization.SerializedTableHeader header = new JCudfSerialization.SerializedTableHeader(din);
+      long headerSize = header.getSerializedHeaderSizeInBytes();
+      assert headerSize < Integer.MAX_VALUE;
       byte[] rawData = bout.toByteArray();
       try (HostMemoryBuffer hmb = HostMemoryBuffer.allocate(2L * rawData.length)) {
         // make two copies of the serialized table to concatenate together
         hmb.setBytes(0, rawData, 0, rawData.length);
         hmb.setBytes(rawData.length, rawData, 0, rawData.length);
+        long[] headerAddrs = new long[]{ hmb.getAddress(), hmb.getAddress() + rawData.length };
+        long[] cpuDataRanges = new long[]{ headerAddrs[0] + headerSize, headerAddrs[1] + headerSize };
+        try (Table actual = ConcatUtil.concatSerializedTables(headerAddrs, cpuDataRanges)) {
+          AssertUtils.assertTablesAreEqual(expected, actual);
+        }
       }
     }
   }
