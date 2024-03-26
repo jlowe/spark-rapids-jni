@@ -56,18 +56,26 @@ public class ConcatUtilTest {
       long headerSize = header.getSerializedHeaderSizeInBytes();
       assert headerSize < Integer.MAX_VALUE;
       byte[] rawData = bout.toByteArray();
+      System.out.println("RAW DATA: " + Arrays.toString(rawData));
       try (HostMemoryBuffer hmb = HostMemoryBuffer.allocate(2L * rawData.length)) {
         // make two copies of the serialized table to concatenate together
         hmb.setBytes(0, rawData, 0, rawData.length);
         hmb.setBytes(rawData.length, rawData, 0, rawData.length);
         long[] headerAddrs = new long[]{ hmb.getAddress(), hmb.getAddress() + rawData.length };
         long[] cpuDataRanges = new long[]{
-            headerAddrs[0] + headerSize, headerAddrs[0] + rawData.length,
-            headerAddrs[1] + headerSize, headerAddrs[1] + rawData.length };
+            headerAddrs[0] + headerSize, rawData.length - headerSize,
+            headerAddrs[1] + headerSize, rawData.length - headerSize };
+        System.out.println(Arrays.toString(headerAddrs));
+        System.out.println(Arrays.toString(cpuDataRanges));
         try (Table actual = ConcatUtil.concatSerializedTables(headerAddrs, cpuDataRanges)) {
           AssertUtils.assertTablesAreEqual(expected, actual);
         }
       }
     }
+  }
+
+  public static void main(String[] argv) throws Exception {
+    ConcatUtilTest t = new ConcatUtilTest();
+    t.testConcatEmpty();
   }
 }

@@ -70,7 +70,7 @@ uint64_t align64(uint64_t offset) {
   return ((offset + 63) / 64) * 64;
 }
 
-cudf::column_view create_column_view(uint8_t const* header_ptr,
+cudf::column_view create_column_view(uint8_t const*& header_ptr,
                                      uint32_t num_rows,
                                      uint8_t const* host_buffer,
                                      uint8_t const* gpu_buffer,
@@ -86,6 +86,7 @@ cudf::column_view create_column_view(uint8_t const* header_ptr,
   auto const dtype_id = read_int(header_ptr);
   auto const scale = read_int(header_ptr);
   auto const null_count = read_int(header_ptr);
+  std::cerr << "dtype_id=" << dtype_id << " scale=" << scale << " null_count=" << null_count << std::endl;
   cudf::data_type dtype = cudf::jni::make_data_type(dtype_id, scale);
   cudf::bitmask_type const* null_mask = nullptr;
   if (null_count != 0) {
@@ -131,7 +132,7 @@ cudf::column_view create_column_view(uint8_t const* header_ptr,
   return cudf::column_view(dtype, num_rows, data, null_mask, 0, 0, children);
 }
 
-cudf::table_view create_table_view(uint8_t const* header_ptr,
+cudf::table_view create_table_view(uint8_t const*& header_ptr,
                                    uint8_t const* host_buffer,
                                    uint8_t const* gpu_buffer,
                                    int64_t& buffer_offset) {
@@ -151,14 +152,16 @@ cudf::table_view create_table_view(uint8_t const* header_ptr,
   }
   auto const num_columns = read_int(header_ptr);
   auto const num_rows = read_int(header_ptr);
-  auto const data_len = read_long(header_ptr);
   auto const buffer_offset_start = buffer_offset;
+  std::cerr << "num_columns=" << num_columns << " num_rows=" << num_rows << std::endl;
   std::vector<cudf::column_view> column_views;
   column_views.reserve(num_columns);
   for (int i = 0; i < num_columns; ++i) {
     column_views.emplace_back(create_column_view(header_ptr, num_rows, host_buffer, gpu_buffer,
       buffer_offset));
   }
+  auto const data_len = read_long(header_ptr);
+  std::cerr << " data_len=" << data_len << std::endl;
   if (buffer_offset - buffer_offset_start != data_len) {
     throw std::runtime_error("table deserialization error");
   }
