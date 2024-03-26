@@ -96,17 +96,18 @@ cudf::column_view create_column_view(uint8_t const*& header_ptr,
   std::vector<cudf::column_view> children;
   void const* data = nullptr;
   if (dtype.id() == cudf::type_id::STRING || dtype.id() == cudf::type_id::LIST) {
-    if (num_rows > 0) {
+    cudf::size_type offsets_count = (num_rows > 0) ? num_rows + 1 : 0;
+    if (offsets_count > 0 || dtype.id() == cudf::type_id::LIST) {
       children.emplace_back(
         cudf::data_type{cudf::type_to_id<cudf::size_type>()},
-        num_rows + 1,
-        gpu_buffer + buffer_offset,
+        offsets_count,
+        offsets_count > 0 ? gpu_buffer + buffer_offset : nullptr,
         nullptr,
         0);
-      auto offsets_len = (num_rows + 1) * sizeof(cudf::size_type);
+      auto const offsets_len = offsets_count * sizeof(cudf::size_type);
       auto host_offsets = reinterpret_cast<cudf::size_type const*>(host_buffer + buffer_offset);
       buffer_offset += align64(offsets_len);
-      if (dtype.id() == cudf::type_id::STRING) {
+      if (offsets_count > 0 && dtype.id() == cudf::type_id::STRING) {
         auto start_offset = host_offsets[0];
         auto end_offset = host_offsets[num_rows];
         data = gpu_buffer + buffer_offset;
