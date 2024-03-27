@@ -134,7 +134,7 @@ cudf::column_view create_column_view(uint8_t const*& header_ptr,
     buffer_offset += align64(data_len);
     std::cerr << "after data buffer_offset=" << buffer_offset << std::endl;
   }
-  return cudf::column_view(dtype, num_rows, data, null_mask, 0, 0, children);
+  return cudf::column_view(dtype, num_rows, data, null_mask, null_count, 0, children);
 }
 
 cudf::table_view create_table_view(uint8_t const*& header_ptr,
