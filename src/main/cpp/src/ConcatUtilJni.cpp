@@ -86,13 +86,11 @@ cudf::column_view create_column_view(uint8_t const*& header_ptr,
   auto const dtype_id = read_int(header_ptr);
   auto const scale = read_int(header_ptr);
   auto const null_count = read_int(header_ptr);
-  std::cerr << "dtype_id=" << dtype_id << " scale=" << scale << " null_count=" << null_count << " buffer_offset=" << buffer_offset << std::endl;
   cudf::data_type dtype = cudf::jni::make_data_type(dtype_id, scale);
   cudf::bitmask_type const* null_mask = nullptr;
   if (null_count != 0) {
     null_mask = reinterpret_cast<cudf::bitmask_type const*>(gpu_buffer + buffer_offset);
     buffer_offset += get_validity_byte_size(num_rows);
-    std::cerr << "after validity: buffer_offset=" << buffer_offset << std::endl;
   }
   std::vector<cudf::column_view> children;
   void const* data = nullptr;
@@ -108,13 +106,11 @@ cudf::column_view create_column_view(uint8_t const*& header_ptr,
       auto const offsets_len = offsets_count * sizeof(cudf::size_type);
       auto host_offsets = reinterpret_cast<cudf::size_type const*>(host_buffer + buffer_offset);
       buffer_offset += align64(offsets_len);
-      std::cerr << "offsets_len=" << offsets_len << " buffer_offset=" << buffer_offset << std::endl;
       if (offsets_count > 0 && dtype.id() == cudf::type_id::STRING) {
         auto start_offset = host_offsets[0];
         auto end_offset = host_offsets[num_rows];
         data = gpu_buffer + buffer_offset;
         buffer_offset += align64(end_offset - start_offset);
-        std::cerr << "string data len=" << end_offset - start_offset << " buffer_offset=" << buffer_offset << std::endl;
       }
     }
     if (dtype.id() == cudf::type_id::LIST) {
@@ -132,7 +128,6 @@ cudf::column_view create_column_view(uint8_t const*& header_ptr,
     data = gpu_buffer + buffer_offset;
     auto data_len = cudf::size_of(dtype) * num_rows;
     buffer_offset += align64(data_len);
-    std::cerr << "after data buffer_offset=" << buffer_offset << std::endl;
   }
   return cudf::column_view(dtype, num_rows, data, null_mask, null_count, 0, children);
 }
@@ -158,7 +153,6 @@ cudf::table_view create_table_view(uint8_t const*& header_ptr,
   auto const num_columns = read_int(header_ptr);
   auto const num_rows = read_int(header_ptr);
   auto const buffer_offset_start = buffer_offset;
-  std::cerr << "num_columns=" << num_columns << " num_rows=" << num_rows << std::endl;
   std::vector<cudf::column_view> column_views;
   column_views.reserve(num_columns);
   for (int i = 0; i < num_columns; ++i) {
@@ -166,8 +160,6 @@ cudf::table_view create_table_view(uint8_t const*& header_ptr,
       buffer_offset));
   }
   auto const data_len = read_long(header_ptr);
-  std::cerr << " data_len=" << data_len << std::endl;
-  std::cerr << "start=" << buffer_offset_start << " offset=" << buffer_offset << std::endl;
   if (buffer_offset - buffer_offset_start != data_len) {
     throw std::runtime_error("table deserialization error");
   }
