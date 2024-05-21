@@ -44,6 +44,7 @@ option(USE_GDS "Build with GPUDirect Storage (GDS)/cuFile support" OFF)
 option(BUILD_TESTS "Configure CMake to build tests" OFF)
 option(BUILD_BENCHMARKS "Configure CMake to build (google) benchmarks" OFF)
 option(BUILD_FAULTINJ "Configure CMake to build fault injection" ON)
+option(BUILD_PROFILER "Configure CMake to build profiler" ON)
 
 message(
   VERBOSE "SPARK_RAPIDS_JNI: Build with per-thread default stream:
@@ -320,4 +321,6 @@ if(SPARK_RAPIDS_JNI_BUILD_FAULTINJ)
   add_subdirectory(faultinj)
 endif()
 
-add_subdirectory(profiler)
+if(BUILD_PROFILER)
+  add_subdirectory(profiler)
+endif()
