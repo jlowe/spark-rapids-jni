@@ -46,10 +46,10 @@ public class ShuffleSplitAssemble {
 
   public static class SplitResult implements AutoCloseable {
     private final DeviceMemoryBuffer buffer;
-    private final int[] offsets;
+    private final DeviceMemoryBuffer offsets;
 
-    SplitResult(long bufferAddr, long bufferSize, long bufferHandle, int[] offsets) {
-      this.buffer = DeviceMemoryBuffer.fromRmm(bufferAddr, bufferSize, bufferHandle);
+    SplitResult(DeviceMemoryBuffer buffer, DeviceMemoryBuffer offsets) {
+      this.buffer = buffer;
       this.offsets = offsets;
     }
 
@@ -57,31 +57,47 @@ public class ShuffleSplitAssemble {
       return buffer;
     }
 
-    public int[] getOffsets() {
+    public DeviceMemoryBuffer getOffsets() {
       return offsets;
     }
 
     @Override
     public void close() {
       buffer.close();
+      offsets.close();
     }
   }
 
-  public static SplitResult split(Table table, int[] splitIndices) {
-    return split(table.getNativeView(), splitIndices);
+  public static SplitResult split(Metadata meta, Table table, int[] splitIndices) {
+    long[] result = split(meta.getNumChildren(), meta.getTypes(), table.getNativeView(),
+        splitIndices);
+    assert(result.length == 6);
+    long bufferAddr = result[0];
+    long bufferSize = result[1];
+    long bufferHandle = result[2];
+    long offsetsAddr = result[3];
+    long offsetsSize = result[4];
+    long offsetsHandle = result[5];
+    DeviceMemoryBuffer buffer = DeviceMemoryBuffer.fromRmm(bufferAddr, bufferSize, bufferHandle);
+    DeviceMemoryBuffer offsets = DeviceMemoryBuffer.fromRmm(offsetsAddr, offsetsSize,
+        offsetsHandle);
+    return new SplitResult(buffer, offsets);
   }
 
   public static Table assemble(Metadata metadata,
                                BaseDeviceMemoryBuffer parts,
                                BaseDeviceMemoryBuffer partOffsets) {
+    // offsets buffer must be an array of long values
+    assert(partOffsets.getLength() % 8 == 0);
     return new Table(assemble(
         metadata.getNumChildren(), metadata.getTypes(),
         parts.getAddress(), parts.getLength(),
-        partOffsets.getAddress(), partOffsets.getLength()));
+        partOffsets.getAddress(), partOffsets.getLength() / 8));
   }
 
-  private static native SplitResult split(long table, int[] splitIndices);
+  private static native long[] split(int[] metaNumChildren, int[] metaTypes, long table,
+                                     int[] splitIndices);
   private static native long[] assemble(int[] numChildren, int[] types,
                                         long partsAddr, long partsSize,
-                                        long partOffsetsAddr, long partOffsetsSize);
+                                        long partOffsetsAddr, long partOffsetsCount);
 }
