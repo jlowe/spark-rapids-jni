@@ -16,10 +16,7 @@
 
 package com.nvidia.spark.rapids.jni;
 
-import ai.rapids.cudf.BaseDeviceMemoryBuffer;
-import ai.rapids.cudf.DeviceMemoryBuffer;
-import ai.rapids.cudf.NativeDepsLoader;
-import ai.rapids.cudf.Table;
+import ai.rapids.cudf.*;
 
 public class ShuffleSplitAssemble {
   static {
@@ -44,11 +41,11 @@ public class ShuffleSplitAssemble {
     }
   }
 
-  public static class SplitResult implements AutoCloseable {
+  public static class DeviceSplitResult implements AutoCloseable {
     private final DeviceMemoryBuffer buffer;
     private final DeviceMemoryBuffer offsets;
 
-    SplitResult(DeviceMemoryBuffer buffer, DeviceMemoryBuffer offsets) {
+    DeviceSplitResult(DeviceMemoryBuffer buffer, DeviceMemoryBuffer offsets) {
       this.buffer = buffer;
       this.offsets = offsets;
     }
@@ -68,8 +65,32 @@ public class ShuffleSplitAssemble {
     }
   }
 
-  public static SplitResult split(Metadata meta, Table table, int[] splitIndices) {
-    long[] result = split(meta.getNumChildren(), meta.getTypes(), table.getNativeView(),
+  public static class HostSplitResult implements AutoCloseable {
+    private final HostMemoryBuffer buffer;
+    private final HostMemoryBuffer offsets;
+
+    HostSplitResult(HostMemoryBuffer buffer, HostMemoryBuffer offsets) {
+      this.buffer = buffer;
+      this.offsets = offsets;
+    }
+
+    public HostMemoryBuffer getBuffer() {
+      return buffer;
+    }
+
+    public HostMemoryBuffer getOffsets() {
+      return offsets;
+    }
+
+    @Override
+    public void close() {
+      buffer.close();
+      offsets.close();
+    }
+  }
+
+  public static DeviceSplitResult splitOnDevice(Metadata meta, Table table, int[] splitIndices) {
+    long[] result = splitOnDevice(meta.getNumChildren(), meta.getTypes(), table.getNativeView(),
         splitIndices);
     assert(result.length == 6);
     long bufferAddr = result[0];
@@ -81,23 +102,34 @@ public class ShuffleSplitAssemble {
     DeviceMemoryBuffer buffer = DeviceMemoryBuffer.fromRmm(bufferAddr, bufferSize, bufferHandle);
     DeviceMemoryBuffer offsets = DeviceMemoryBuffer.fromRmm(offsetsAddr, offsetsSize,
         offsetsHandle);
-    return new SplitResult(buffer, offsets);
+    return new DeviceSplitResult(buffer, offsets);
   }
 
-  public static Table assemble(Metadata metadata,
-                               BaseDeviceMemoryBuffer parts,
-                               BaseDeviceMemoryBuffer partOffsets) {
+  public static HostSplitResult splitOnHost(Metadata meta, ColumnVector[] columns, int[] splitIndices) {
+    throw new UnsupportedOperationException();
+  }
+
+  public static Table assembleOnDevice(Metadata metadata,
+                                       BaseDeviceMemoryBuffer parts,
+                                       BaseDeviceMemoryBuffer partOffsets) {
     // offsets buffer must be an array of long values
     assert(partOffsets.getLength() % 8 == 0);
-    return new Table(assemble(
+    return new Table(assembleOnDevice(
         metadata.getNumChildren(), metadata.getTypes(),
         parts.getAddress(), parts.getLength(),
         partOffsets.getAddress(), partOffsets.getLength() / 8));
   }
 
-  private static native long[] split(int[] metaNumChildren, int[] metaTypes, long table,
-                                     int[] splitIndices);
-  private static native long[] assemble(int[] numChildren, int[] types,
-                                        long partsAddr, long partsSize,
-                                        long partOffsetsAddr, long partOffsetsCount);
+  public static HostMemoryBuffer concatOnHost(Metadata metadata,
+                                              HostMemoryBuffer parts,
+                                              HostMemoryBuffer partOffsets) {
+    // offsets buffer must be an array of long values
+    assert(partOffsets.getLength() % 8 == 0);
+    throw new UnsupportedOperationException();
+  }
+  private static native long[] splitOnDevice(int[] metaNumChildren, int[] metaTypes, long table,
+                                             int[] splitIndices);
+  private static native long[] assembleOnDevice(int[] numChildren, int[] types,
+                                                long partsAddr, long partsSize,
+                                                long partOffsetsAddr, long partOffsetsCount);
 }

@@ -63,7 +63,7 @@ std::unique_ptr<cudf::table> shuffle_assemble(cz_metadata const& global_metadata
 
 extern "C" {
 
-JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemble_split(
+JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemble_splitOnDevice(
   JNIEnv* env, jclass, jintArray jmeta_num_children, jintArray jmeta_types, jlong jtable,
   jintArray jsplit_indices)
 {
@@ -100,7 +100,7 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemb
   CATCH_STD(env, nullptr);
 }
 
-JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemble_assemble(
+JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemble_assembleOnDevice(
   JNIEnv* env, jclass, jintArray jmeta_num_children, jintArray jmeta_types,
   jlong parts_addr, jlong parts_size, jlong offsets_addr, jlong offsets_count)
 {
