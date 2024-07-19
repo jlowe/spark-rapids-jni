@@ -120,13 +120,24 @@ public class ShuffleSplitAssemble {
         partOffsets.getAddress(), partOffsets.getLength() / 8));
   }
 
-  public static HostMemoryBuffer concatOnHost(Metadata metadata,
-                                              HostMemoryBuffer parts,
-                                              HostMemoryBuffer partOffsets) {
-    // offsets buffer must be an array of long values
-    assert(partOffsets.getLength() % 8 == 0);
+  public static Table singlePartitionToTable(Metadata metadata, DeviceMemoryBuffer part) {
     throw new UnsupportedOperationException();
   }
+
+  public static HostMemoryBuffer concatOnHost(Metadata metadata,
+                                              HostMemoryBuffer parts,
+                                              long[] partOffsets) {
+    throw new UnsupportedOperationException();
+  }
+
+  public static int getPartitionRowCount(HostMemoryBuffer hmb) {
+    return getPartitionRowCount(hmb, 0);
+  }
+
+  public static int getPartitionRowCount(HostMemoryBuffer hmb, long partOffset) {
+    return hmb.getInt(partOffset);
+  }
+
   private static native long[] splitOnDevice(int[] metaNumChildren, int[] metaTypes, long table,
                                              int[] splitIndices);
   private static native long[] assembleOnDevice(int[] numChildren, int[] types,
