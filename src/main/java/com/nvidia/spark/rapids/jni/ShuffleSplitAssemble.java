@@ -23,24 +23,6 @@ public class ShuffleSplitAssemble {
     NativeDepsLoader.loadNativeDeps();
   }
 
-  public static class Metadata {
-    private final int[] numChildren;
-    private final int[] types;
-
-    public Metadata(int[] numChildren, int[] types) {
-      this.numChildren = numChildren;
-      this.types = types;
-    }
-
-    public int[] getNumChildren() {
-      return numChildren;
-    }
-
-    public int[] getTypes() {
-      return types;
-    }
-  }
-
   public static class DeviceSplitResult implements AutoCloseable {
     private final DeviceMemoryBuffer buffer;
     private final DeviceMemoryBuffer offsets;
@@ -89,9 +71,8 @@ public class ShuffleSplitAssemble {
     }
   }
 
-  public static DeviceSplitResult splitOnDevice(Metadata meta, Table table, int[] splitIndices) {
-    long[] result = splitOnDevice(meta.getNumChildren(), meta.getTypes(), table.getNativeView(),
-        splitIndices);
+  public static DeviceSplitResult splitOnDevice(int[] metadata, Table table, int[] splitIndices) {
+    long[] result = splitOnDevice(metadata, table.getNativeView(), splitIndices);
     assert(result.length == 6);
     long bufferAddr = result[0];
     long bufferSize = result[1];
@@ -105,28 +86,33 @@ public class ShuffleSplitAssemble {
     return new DeviceSplitResult(buffer, offsets);
   }
 
-  public static HostSplitResult splitOnHost(Metadata meta, ColumnVector[] columns, int[] splitIndices) {
+  public static HostSplitResult splitOnHost(int[] metadata,
+                                            ColumnVector[] columns,
+                                            int[] splitIndices) {
     throw new UnsupportedOperationException();
   }
 
-  public static Table assembleOnDevice(Metadata metadata,
+  public static Table assembleOnDevice(int[] metadata,
                                        BaseDeviceMemoryBuffer parts,
                                        BaseDeviceMemoryBuffer partOffsets) {
     // offsets buffer must be an array of long values
     assert(partOffsets.getLength() % 8 == 0);
     return new Table(assembleOnDevice(
-        metadata.getNumChildren(), metadata.getTypes(),
-        parts.getAddress(), parts.getLength(),
+        metadata, parts.getAddress(), parts.getLength(),
         partOffsets.getAddress(), partOffsets.getLength() / 8));
   }
 
-  public static Table singlePartitionToTable(Metadata metadata, DeviceMemoryBuffer part) {
+  public static Table singlePartitionToTable(int[] metadata, DeviceMemoryBuffer part) {
     throw new UnsupportedOperationException();
   }
 
-  public static HostMemoryBuffer concatOnHost(Metadata metadata,
+  public static HostMemoryBuffer concatOnHost(int[] metadata,
                                               HostMemoryBuffer parts,
                                               long[] partOffsets) {
+    throw new UnsupportedOperationException();
+  }
+
+  public static HostColumnVector[] toHostColumns(int[] metadata, HostMemoryBuffer partition) {
     throw new UnsupportedOperationException();
   }
 
@@ -138,9 +124,7 @@ public class ShuffleSplitAssemble {
     return hmb.getInt(partOffset);
   }
 
-  private static native long[] splitOnDevice(int[] metaNumChildren, int[] metaTypes, long table,
-                                             int[] splitIndices);
-  private static native long[] assembleOnDevice(int[] numChildren, int[] types,
-                                                long partsAddr, long partsSize,
+  private static native long[] splitOnDevice(int[] metadata, long table, int[] splitIndices);
+  private static native long[] assembleOnDevice(int[] metadata, long partsAddr, long partsSize,
                                                 long partOffsetsAddr, long partOffsetsCount);
 }

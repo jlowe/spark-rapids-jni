@@ -26,7 +26,12 @@
 #include <cudf/types.hpp>
 #include <vector>
 namespace spark_rapids_jni {
-struct cz_metadata {
+struct shuffle_split_col_data {
+  cudf::size_type num_children;
+  cudf::type_id type;
+};
+
+struct shuffle_split_metadata {
   // depth-first traversal
   // - a fixed column or strings have 0
   // - a list column always has 1 (I guess we could also make this
@@ -34,10 +39,9 @@ struct cz_metadata {
   //   as explicitly having a child because the type is completely arbitrary)
   // - structs have N
   //
-  std::vector<cudf::size_type>      num_children{};
-  std::vector<cudf::type_id>  types{};
+  std::vector<shuffle_split_col_data> col_info{};
 };
-struct cz_result {
+struct shuffle_split_result {
   // packed partition buffers. very similar to what would have come out of
   // contiguous_split, except:
   // - it is one big buffer where all of the partitions are glued together instead
@@ -46,46 +50,53 @@ struct cz_result {
   // etc
   std::unique_ptr<rmm::device_buffer>    partitions;
   // offsets into the partition buffer for each partition. offsets.size() will be
-  // num partitions + 1
+  // num partitions
   std::unique_ptr<rmm::device_uvector<size_t>>   offsets;
 };
-cz_result shuffle_split(cudf::table_view const& input,
-                        cz_metadata const& global_metadata,
+shuffle_split_result shuffle_split(cudf::table_view const& input,
+                        shuffle_split_metadata const& global_metadata,
                         std::vector<cudf::size_type> const& splits,
                         rmm::cuda_stream_view stream,
                         rmm::device_async_resource_ref mr);
-std::unique_ptr<cudf::table> shuffle_assemble(cz_metadata const& global_metadata,
-                                        cudf::device_span<int8_t const> partitions,
-                                        cudf::device_span<size_t const> partition_offsets);
+std::unique_ptr<cudf::table> shuffle_assemble(shuffle_split_metadata const& global_metadata,
+                                              cudf::device_span<int8_t const> partitions,
+                                              cudf::device_span<size_t const> partition_offsets);
 }
 //====================
 
+namespace {
+
+spark_rapids_jni::shuffle_split_metadata to_metadata(JNIEnv* env, jintArray jmeta)
+{
+  cudf::jni::native_jintArray metadata(env, jmeta);
+  std::vector<spark_rapids_jni::shuffle_split_col_data> result;
+  result.reserve(metadata.size());
+  for (int i = 0; i < metadata.size(); i += 2) {
+    auto num_children = metadata[i];
+    auto type_id = static_cast<cudf::type_id>(metadata[i+1]);
+    result.push_back({num_children, type_id});
+  }
+  metadata.cancel();
+  return spark_rapids_jni::shuffle_split_metadata{std::move(result)};
+}
+
+}  // anonymous namespace
 
 extern "C" {
 
 JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemble_splitOnDevice(
-  JNIEnv* env, jclass, jintArray jmeta_num_children, jintArray jmeta_types, jlong jtable,
-  jintArray jsplit_indices)
+  JNIEnv* env, jclass, jintArray jmeta, jlong jtable, jintArray jsplit_indices)
 {
-  JNI_NULL_CHECK(env, jmeta_num_children, "metadata num children is null", nullptr);
-  JNI_NULL_CHECK(env, jmeta_types, "metadata types is null", nullptr);
+  JNI_NULL_CHECK(env, jmeta, "metadata is null", nullptr);
   JNI_NULL_CHECK(env, jtable, "input table is null", nullptr);
   try {
     cudf::jni::auto_set_device(env);
     auto const table = reinterpret_cast<cudf::table_view const*>(jtable);
-    cudf::jni::native_jintArray meta_num_children(env, jmeta_num_children);
-    cudf::jni::native_jintArray meta_types(env, jmeta_types);
-    std::vector<cudf::type_id> cudf_types;
-    cudf_types.reserve(meta_types.size());
-    std::transform(meta_types.begin(), meta_types.end(), std::back_inserter(cudf_types),
-                   [](auto id) { return static_cast<cudf::type_id>(id); });
+    auto metadata = to_metadata(env, jmeta);
     cudf::jni::native_jintArray indices(env, jsplit_indices);
-    spark_rapids_jni::cz_metadata meta{meta_num_children.to_vector(), std::move(cudf_types)};
-    auto split_result = spark_rapids_jni::shuffle_split(*table, meta, indices.to_vector(),
+    auto split_result = spark_rapids_jni::shuffle_split(*table, metadata, indices.to_vector(),
                                                         cudf::get_default_stream(),
                                                         rmm::mr::get_current_device_resource());
-    meta_num_children.cancel();
-    meta_types.cancel();
     indices.cancel();
     cudf::jni::native_jlongArray result(env, 6);
     auto offsets_buffer = std::make_unique<rmm::device_buffer>(split_result.offsets->release());
@@ -101,11 +112,10 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemb
 }
 
 JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemble_assembleOnDevice(
-  JNIEnv* env, jclass, jintArray jmeta_num_children, jintArray jmeta_types,
-  jlong parts_addr, jlong parts_size, jlong offsets_addr, jlong offsets_count)
+  JNIEnv* env, jclass, jintArray jmeta, jlong parts_addr, jlong parts_size,
+  jlong offsets_addr, jlong offsets_count)
 {
-  JNI_NULL_CHECK(env, jmeta_num_children, "metadata num children is null", nullptr);
-  JNI_NULL_CHECK(env, jmeta_types, "metadata types is null", nullptr);
+  JNI_NULL_CHECK(env, jmeta, "metadata is null", nullptr);
   JNI_NULL_CHECK(env, parts_addr, "partitions buffer is null", nullptr);
   JNI_NULL_CHECK(env, offsets_addr, "offsets buffer is null", nullptr);
   try {
@@ -114,13 +124,7 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemb
     cudf::device_span<int8_t const> parts_span{parts_ptr, static_cast<size_t>(parts_size)};
     auto const offsets_ptr = reinterpret_cast<size_t const*>(offsets_addr);
     cudf::device_span<size_t const> offsets_span{offsets_ptr, static_cast<size_t>(offsets_count)};
-    cudf::jni::native_jintArray meta_num_children(env, jmeta_num_children);
-    cudf::jni::native_jintArray meta_types(env, jmeta_types);
-    std::vector<cudf::type_id> cudf_types;
-    cudf_types.reserve(meta_types.size());
-    std::transform(meta_types.begin(), meta_types.end(), std::back_inserter(cudf_types),
-                   [](auto id) { return static_cast<cudf::type_id>(id); });
-    spark_rapids_jni::cz_metadata meta{meta_num_children.to_vector(), cudf_types};
+    auto meta = to_metadata(env, jmeta);
     auto table = spark_rapids_jni::shuffle_assemble(meta, parts_span, offsets_span);
     return cudf::jni::convert_table_for_return(env, table);
   }
