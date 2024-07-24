@@ -87,7 +87,7 @@ public class ShuffleSplitAssemble {
   }
 
   public static HostSplitResult splitOnHost(int[] metadata,
-                                            ColumnVector[] columns,
+                                            Table table,
                                             int[] splitIndices) {
     throw new UnsupportedOperationException();
   }
@@ -111,6 +111,11 @@ public class ShuffleSplitAssemble {
                                               long[] partOffsets) {
     throw new UnsupportedOperationException();
   }
+
+  public static HostMemoryBuffer concatOnHost(int[] metadata, HostMemoryBuffer... parts) {
+    throw new UnsupportedOperationException();
+  }
+
 
   public static HostColumnVector[] toHostColumns(int[] metadata, HostMemoryBuffer partition) {
     throw new UnsupportedOperationException();
