@@ -15,6 +15,7 @@
  */
 
 #include "cudf_jni_apis.hpp"
+#include "host_table_view.hpp"
 
 #include <cudf/utilities/span.hpp>
 #include <cudf/table/table_view.hpp>
@@ -127,6 +128,29 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemb
     auto meta = to_metadata(env, jmeta);
     auto table = spark_rapids_jni::shuffle_assemble(meta, parts_span, offsets_span);
     return cudf::jni::convert_table_for_return(env, table);
+  }
+  CATCH_STD(env, nullptr);
+}
+
+JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemble_splitOnHostSize(
+  JNIEnv* env, jclass, jlong jhost_table, jlong data_address, jlong data_size)
+{
+  JNI_NULL_CHECK(env, jhost_table, "table is null", 0);
+  try {
+
+  }
+  CATCH_STD(env, 0);
+}
+
+JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemble_splitOnHost(
+  JNIEnv* env, jclass, jlong jhost_table, jlong data_address, jlong dest_address, jlong dest_size)
+{
+  JNI_NULL_CHECK(env, jhost_table, "table is null", 0);
+  try {
+    auto t = reinterpret_cast<spark_rapids_jni::host_table_view const*>(jhost_table);
+    auto src_ptr = reinterpret_cast<uint8_t const*>(data_address);
+    auto dst_ptr = reinterpret_cast<uint8_t*>(dest_address);
+
   }
   CATCH_STD(env, nullptr);
 }

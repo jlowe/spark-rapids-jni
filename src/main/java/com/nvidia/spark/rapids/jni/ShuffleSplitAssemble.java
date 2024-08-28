@@ -49,9 +49,9 @@ public class ShuffleSplitAssemble {
 
   public static class HostSplitResult implements AutoCloseable {
     private final HostMemoryBuffer buffer;
-    private final HostMemoryBuffer offsets;
+    private final long[] offsets;
 
-    HostSplitResult(HostMemoryBuffer buffer, HostMemoryBuffer offsets) {
+    HostSplitResult(HostMemoryBuffer buffer, long[] offsets) {
       this.buffer = buffer;
       this.offsets = offsets;
     }
@@ -60,14 +60,13 @@ public class ShuffleSplitAssemble {
       return buffer;
     }
 
-    public HostMemoryBuffer getOffsets() {
+    public long[] getOffsets() {
       return offsets;
     }
 
     @Override
     public void close() {
       buffer.close();
-      offsets.close();
     }
   }
 
@@ -86,10 +85,9 @@ public class ShuffleSplitAssemble {
     return new DeviceSplitResult(buffer, offsets);
   }
 
-  public static HostSplitResult splitOnHost(int[] metadata,
-                                            HostTable table,
+  public static HostSplitResult splitOnHost(HostTable table,
                                             int[] splitIndices) {
-    throw new UnsupportedOperationException();
+    long hostSize =
   }
 
   public static Table assembleOnDevice(int[] metadata,
@@ -132,4 +130,7 @@ public class ShuffleSplitAssemble {
   private static native long[] splitOnDevice(int[] metadata, long table, int[] splitIndices);
   private static native long[] assembleOnDevice(int[] metadata, long partsAddr, long partsSize,
                                                 long partOffsetsAddr, long partOffsetsCount);
+  private static native long splitOnHostSize(long host_table_handle, long data_address, long data_size);
+  private static native long[] splitOnHost(long host_table_handle, long data_address,
+                                           long dest_address, long dest_size);
 }
