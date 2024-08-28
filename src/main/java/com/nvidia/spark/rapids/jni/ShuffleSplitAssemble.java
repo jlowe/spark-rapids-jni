@@ -87,7 +87,7 @@ public class ShuffleSplitAssemble {
   }
 
   public static HostSplitResult splitOnHost(int[] metadata,
-                                            Table table,
+                                            HostTable table,
                                             int[] splitIndices) {
     throw new UnsupportedOperationException();
   }
