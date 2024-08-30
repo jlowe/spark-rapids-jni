@@ -87,7 +87,8 @@ public class ShuffleSplitAssemble {
 
   public static HostSplitResult splitOnHost(HostTable table,
                                             int[] splitIndices) {
-    long hostSize =
+    long hostSize = splitOnHostSize(table.getTableHandle(), table.getHostBuffer().getAddress(),
+        table.getHostBuffer().getLength(), splitIndices)
   }
 
   public static Table assembleOnDevice(int[] metadata,
@@ -130,7 +131,8 @@ public class ShuffleSplitAssemble {
   private static native long[] splitOnDevice(int[] metadata, long table, int[] splitIndices);
   private static native long[] assembleOnDevice(int[] metadata, long partsAddr, long partsSize,
                                                 long partOffsetsAddr, long partOffsetsCount);
-  private static native long splitOnHostSize(long host_table_handle, long data_address, long data_size);
+  private static native long splitOnHostSize(long host_table_handle, long data_address,
+                                             long data_size, int[] splitIndices);
   private static native long[] splitOnHost(long host_table_handle, long data_address,
                                            long dest_address, long dest_size);
 }

@@ -19,13 +19,15 @@
 
 #include <cudf/utilities/span.hpp>
 #include <cudf/table/table_view.hpp>
+#include <rmm/aligned.hpp>
 #include <rmm/device_buffer.hpp>
 #include <rmm/device_uvector.hpp>
+
+#include <vector>
 
 //====================
 //temporary declarations until headers are available
 #include <cudf/types.hpp>
-#include <vector>
 namespace spark_rapids_jni {
 struct shuffle_split_col_data {
   cudf::size_type num_children;
@@ -67,6 +69,9 @@ std::unique_ptr<cudf::table> shuffle_assemble(shuffle_split_metadata const& glob
 
 namespace {
 
+using spark_rapids_jni::host_column_view;
+using spark_rapids_jni::host_table_view;
+
 spark_rapids_jni::shuffle_split_metadata to_metadata(JNIEnv* env, jintArray jmeta)
 {
   cudf::jni::native_jintArray metadata(env, jmeta);
@@ -79,6 +84,57 @@ spark_rapids_jni::shuffle_split_metadata to_metadata(JNIEnv* env, jintArray jmet
   }
   metadata.cancel();
   return spark_rapids_jni::shuffle_split_metadata{std::move(result)};
+}
+
+std::size_t num_total_columns(host_column_view const& c)
+{
+  std::size_t sum = 1;  // include the current column
+  return std::accumulate(c.child_begin(), c.child_end(), sum,
+    [](std::size_t sum, host_column_view const& c) { return sum + num_total_columns(c); });
+}
+
+std::size_t num_total_columns(host_table_view const& t)
+{
+  std::size_t sum = 0;
+  return std::accumulate(t.begin(), t.end(), sum,
+    [](std::size_t sum, host_column_view const& c) { return sum + num_total_columns(c); });
+}
+
+std::size_t header_size(host_table_view const& t)
+{
+  // header is:
+  //   - 4 byte row count
+  //   - null mask presence for each column, one bit per column in depth-first traversal
+  // padded to multiple of 16 bytes
+  std::size_t null_mask_presence_size = (num_total_columns(t) + 7) / 8;
+  std::size_t prepadded_size = 4 + null_mask_presence_size;
+  return rmm::align_up(prepadded_size, 16);
+}
+
+std::size_t total_headers_size(host_table_view const& t, cudf::jni::native_jintArray split_indices)
+{
+  std::size_t single_header_size = header_size(t);
+  std::size_t sum = 0;
+  if (split_indices.size() > 0) {
+    if (split_indices[0] != 0) {
+      throw std::runtime_error("first split does not start at 0");
+    }
+    for (int i = 0; i < split_indices.size() - 1; i++) {
+      if (split_indices[i] != split_indices[i + 1]) {
+        sum += single_header_size;
+      }
+    }
+    if (split_indices[split_indices.size() - 1] != t.num_rows()) {
+      sum +== single_header_size;
+    }
+  }
+}
+
+std::size_t split_on_host_size(host_table_view const& t, uint8_t const* bp,
+                               uint8_t const* bp_end, cudf::jni::native_jintArray split_indices)
+{
+  std::size_t total_size = total_headers_size(t, split_indices);
+
 }
 
 }  // anonymous namespace
@@ -133,11 +189,17 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemb
 }
 
 JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemble_splitOnHostSize(
-  JNIEnv* env, jclass, jlong jhost_table, jlong data_address, jlong data_size)
+  JNIEnv* env, jclass, jlong jhost_table, jlong data_address, jlong data_size,
+  jlongArray jsplit_indices)
 {
   JNI_NULL_CHECK(env, jhost_table, "table is null", 0);
+  JNI_NULL_CHECK(env, jsplit_indices, "indices is null", 0);
   try {
-
+    auto t = reinterpret_cast<spark_rapids_jni::host_table_view const*>(jhost_table);
+    auto bp = reinterpret_cast<uint8_t const*>(data_address);
+    auto bp_end = bp + data_size;
+    cudf::jni::native_jintArray split_indices(env, jsplit_indices);
+    return static_cast<jlong>(split_on_host_size(*t, bp, bp_end, split_indices));
   }
   CATCH_STD(env, 0);
 }
@@ -150,7 +212,7 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemb
     auto t = reinterpret_cast<spark_rapids_jni::host_table_view const*>(jhost_table);
     auto src_ptr = reinterpret_cast<uint8_t const*>(data_address);
     auto dst_ptr = reinterpret_cast<uint8_t*>(dest_address);
-
+    todo
   }
   CATCH_STD(env, nullptr);
 }
