@@ -300,7 +300,8 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemb
     auto t = reinterpret_cast<spark_rapids_jni::host_table_view const*>(jhost_table);
     auto src_ptr = reinterpret_cast<uint8_t const*>(data_address);
     auto dst_ptr = reinterpret_cast<uint8_t*>(dest_address);
-    todo
+    auto split_offsets = split_on_host(*t, src_ptr, dst_ptr, static_cast<std::size_t>(dest_size));
+    return cudf::jni::native_jlongArray(env, split_offsets).get_jArray();
   }
   CATCH_STD(env, nullptr);
 }
