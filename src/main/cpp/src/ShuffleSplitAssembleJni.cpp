@@ -321,11 +321,43 @@ std::vector<uint32_t> compute_has_nulls_mask(host_table_view const& t)
   return mask;
 }
 
+uint8_t* copy_validity(cudf::bitmask_type const* mask, cudf::size_type split_start, cudf::size_type split_end,
+                       uint8_t* op, uint8_t* op_end)
+{
+  auto num_rows = split_end - split_start;
+  static_assert(sizeof(cudf::bitmask_type) == 4, "bitmask copy needs update");
+  auto num_mask_bytes = (num_rows + 7) / 8;
+  auto padded_size = pad_size(num_mask_bytes);
+  size_check(op, op_end, padded_size);
+  if (split_start % 8 == 0) {
+    std::memcpy(op, mask, num_mask_bytes);
+    for (std::size_t i = 0; i < padded_size - num_mask_bytes; i++) {
+      *op++ = 0;
+    }
+  } else {
+    todo
+  }
+}
+
+uint8_t* add_split_data(host_column_view const& c, cudf::size_type split_start, cudf::size_type split_end,
+                        uint8_t* out, uint8_t* out_end)
+{
+  auto op = out;
+  if (c.has_nulls()) {
+    op = copy_validity(c.null_mask(), split_start, split_end, op, out_end);
+  }
+  todo
+  return op;
+}
+
 uint8_t* add_split_data(host_table_view const& t, cudf::size_type split_start, cudf::size_type split_end,
                         uint8_t* out, uint8_t* out_end)
 {
-  // todo
-  return nullptr;
+  auto op = out;
+  std::for_each(t.begin(), t.end(), [=, &op](host_column_view const& c) {
+    op = add_split_data(c, split_start, split_end, op, out_end);
+  });
+  return op;
 }
 
 uint8_t* single_split_on_host(host_table_view const& t, std::vector<uint32_t> const& has_nulls_mask,
