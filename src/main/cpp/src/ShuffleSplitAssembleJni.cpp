@@ -17,12 +17,17 @@
 #include "cudf_jni_apis.hpp"
 #include "host_table_view.hpp"
 
+#include <cudf/lists/lists_column_view.hpp>
+#include <cudf/strings/strings_column_view.hpp>
 #include <cudf/utilities/span.hpp>
 #include <cudf/table/table_view.hpp>
 #include <rmm/aligned.hpp>
 #include <rmm/device_buffer.hpp>
 #include <rmm/device_uvector.hpp>
 
+#include <cstring>
+#include <limits>
+#include <tuple>
 #include <vector>
 
 //====================
@@ -77,11 +82,17 @@ constexpr static int PAD_SIZE = 8;
 
 std::size_t pad_size(std::size_t s)
 {
-  return rmm::align_up(size, PAD_SIZE);
+  return rmm::align_up(s, PAD_SIZE);
 }
 
-// empty tables are serialized just as a 4-byte row count
-constexpr static int EMPTY_HEADER_SIZE = 4;
+// Empty tables are serialized as a total size and row count. Using cudf::size_type for
+// total size since Spark cannot handle serialized objects larger than 2G.
+constexpr static int EMPTY_HEADER_SIZE = sizeof(cudf::size_type) * 2;
+
+[[noreturn]] void type_error(cudf::type_id id)
+{
+  throw std::runtime_error(std::string("unexpected type: ") + std::to_string(static_cast<int>(id)));
+}
 
 spark_rapids_jni::shuffle_split_metadata to_metadata(JNIEnv* env, jintArray jmeta)
 {
@@ -100,39 +111,56 @@ spark_rapids_jni::shuffle_split_metadata to_metadata(JNIEnv* env, jintArray jmet
 std::size_t num_total_columns(host_column_view const& c)
 {
   std::size_t sum = 1;  // include the current column
-  return std::accumulate(c.child_begin(), c.child_end(), sum,
-    [](std::size_t sum, host_column_view const& c) { return sum + num_total_columns(c); });
+  // offset columns of strings and lists are not counted
+  if (c.num_children() > 0) {
+    switch (c.type().id()) {
+      case cudf::type_id::STRING:
+        // string offset column is skipped
+        break;
+      case cudf::type_id::LIST:
+        // list offset column is skipped
+        sum += num_total_columns(c.lists_child());
+        break;
+      case cudf::type_id::STRUCT:
+        sum += std::accumulate(c.child_begin(), c.child_end(), 0,
+          [](std::size_t sum, host_column_view const& c) { return sum + num_total_columns(c); });
+        break;
+      default:
+        type_error(c.type().id());
+    }
+  }
+  return sum;
 }
 
 std::size_t num_total_columns(host_table_view const& t)
 {
-  std::size_t sum = 0;
-  return std::accumulate(t.begin(), t.end(), sum,
+  return std::accumulate(t.begin(), t.end(), 0,
     [](std::size_t sum, host_column_view const& c) { return sum + num_total_columns(c); });
 }
 
 std::size_t non_empty_header_size(host_table_view const& t)
 {
   // header is:
+  //   - 4 byte total split size
   //   - 4 byte row count
   //   - null mask presence for each column, one bit per column in depth-first traversal
-  // padded to multiple of 8 bytes
+  // padded to multiple of 8 bytes not including initial total size
   std::size_t null_mask_presence_size = (num_total_columns(t) + 7) / 8;
   std::size_t prepadded_size = 4 + null_mask_presence_size;
-  return pad_size(prepadded_size);
+  return 4 + pad_size(prepadded_size);
 }
 
 std::size_t get_string_data_split_size(host_column_view const& c, cudf::size_type split_start, cudf::size_type split_rows)
 {
   // last offset is the size of the data
-  auto const& offsets = c.child(0);
-  if (offsets.type.id() == cudf::type_id::INT32) {
-    return offsets.data<int32_t const*>()[c.size()];
-  } else if (offsets.type.id() == cudf::type_id::INT64) {
-    return offsets.data<int64_t const*>()[c.size()];
-  } else {
-    throw std::runtime_error(std::string("unexpected offset type: "
-      + std::to_string(static_cast<int>(dtype.id())));
+  auto const& offsets = c.strings_offsets();
+  switch (offsets.type().id()) {
+    case cudf::type_id::INT32:
+      return static_cast<std::size_t>(offsets.data<int32_t const>()[c.size()]);
+    case cudf::type_id::INT64:
+      return static_cast<std::size_t>(offsets.data<int64_t const>()[c.size()]);
+    default:
+      type_error(offsets.type().id());
   }
 }
 
@@ -143,28 +171,28 @@ std::size_t get_data_size(host_column_view const& c, cudf::size_type split_start
     return 0;
   }
   auto dtype = c.type();
-  if (data == nullptr) {  if (cudf::is_fixed_width(dtype)) {
+  if (cudf::is_fixed_width(dtype)) {
     return cudf::size_of(dtype) * split_rows;
   } else if (dtype.id() == cudf::type_id::STRING) {
-    return get_string_data_split_size(c, split_start, split_rows)
+    return get_string_data_split_size(c, split_start, split_rows);
   } else {
-    throw std::runtime_error(std::string("unexpected data type: ")
-      + std::to_string(static_cast<int>(dtype.id())));
+    type_error(dtype.id());
   }
 }
 
-cudf::size_type get_list_child_split_rows(host_column_view const& offsets, cudf::size_type split_start, cudf::size_type split_rows)
+std::pair<cudf::size_type, cudf::size_type>
+get_offsets_split_info(host_column_view const& offsets, cudf::size_type split_start, cudf::size_type split_rows)
 {
   auto split_end = split_start + split_rows;
   CUDF_EXPECTS(split_end < offsets.size(), "split range exceeds offsets");
   CUDF_EXPECTS(offsets.type().id() == cudf::type_id::INT32, "offsets are not INT32");
-  auto data_ptr = offsets.data<int32_t const*>();
+  auto data_ptr = offsets.data<int32_t const>();
   CUDF_EXPECTS(data_ptr != nullptr, "offsets are missing");
   auto child_split_start = data_ptr[split_start];
   auto child_split_end = data_ptr[split_start + split_rows];
   auto child_split_rows = child_split_end - child_split_start;
   CUDF_EXPECTS(child_split_rows >= 0, "split range is negative");
-  return child_split_rows;
+  return std::make_pair(child_split_start, child_split_rows);
 }
 
 std::size_t split_size(host_column_view const& c, cudf::size_type split_start, cudf::size_type split_rows)
@@ -173,37 +201,40 @@ std::size_t split_size(host_column_view const& c, cudf::size_type split_start, c
   if (c.has_nulls()) {
     sum += pad_size((split_rows + 7) / 8);
   }
-  sum += pad_size(get_data_size(c));
+  sum += pad_size(get_data_size(c, split_start, split_rows));
   if (c.num_children() > 0) {
-    auto type_id = c.type().id();
-    if (type_id == cudf::type_id::STRING || type_id == cudf::type_id::LIST) {
-      // account for size of offsets column which contains one more entry than parent row count
-      auto const& offsets = c.child(0);
-      sum += cudf::size_of(offsets.type()) * (split_rows + 1);
-      if (type_id == cudf::type_id::LIST) {
-        auto split_end = split_start + split_rows;
-        CUDF_EXPECTS(split_end < offsets.size(), "split range exceeds offsets");
-        CUDF_EXPECTS(offsets.type().id() == cudf::type_id::INT32, "offsets are not INT32");
-        auto offsets_ptr = offsets.data<int32_t const*>();
-        auto child_split_start = data_ptr[split_start];
-        auto child_split_rows = data_ptr[split_end] - split_start;
-        sum += split_size(c.child(1), child_split_start, child_split_rows);
+    switch(c.type().id()) {
+      case cudf::type_id::STRING:
+      {
+        // account for size of offsets column which contains one more entry than parent row count
+        auto const& offsets = c.strings_offsets();
+        sum += pad_size(cudf::size_of(offsets.type()) * (split_rows + 1));
+        auto [child_split_start, child_split_rows] = get_offsets_split_info(offsets, split_start, split_rows);
+        sum += child_split_rows;
+        break;
       }
-    }
-    else if (type_id == cudf::type_id::STRUCT) {
-      sum += std::accumulate(c.child_begin(), c.child_end(), 0,
-        [split_start, split_rows](std::size_t s, host_column_view const& child) {
-          return s + split_size(child, split_start, split_rows);
-        });
-    } else {
-      throw std::runtime_error(std::string("unexpected type: ") + std::to_string(static_cast<int>(type_id)));
+      case cudf::type_id::LIST:
+      {
+        // account for size of offsets column which contains one more entry than parent row
+        auto const& offsets = c.lists_offsets();
+        sum += pad_size(cudf::size_of(offsets.type()) * (split_rows + 1));
+        auto [child_split_start, child_split_rows] = get_offsets_split_info(offsets, split_start, split_rows);
+        sum += split_size(c.lists_child(), child_split_start, child_split_rows);
+        break;
+      }
+      case cudf::type_id::STRUCT:
+        sum += std::accumulate(c.child_begin(), c.child_end(), 0,
+          [split_start, split_rows](std::size_t s, host_column_view const& child) {
+            return s + split_size(child, split_start, split_rows);
+          });
+      default:
+        type_error(c.type().id());
     }
   }
   return sum;
 }
 
-std::size_t split_on_host_size(host_table_view const& t, uint8_t const* bp, uint8_t const* bp_end,
-                               cudf::jni::native_jintArray const& split_indices)
+std::size_t split_on_host_size(host_table_view const& t, cudf::jni::native_jintArray const& split_indices)
 {
   if (t.num_rows() == 0) {
     return EMPTY_HEADER_SIZE * split_indices.size();
@@ -219,10 +250,129 @@ std::size_t split_on_host_size(host_table_view const& t, uint8_t const* bp, uint
       sum += std::accumulate(t.begin(), t.end(), single_header_size,
         [split_rows, split_start](std::size_t s, host_column_view const& c) {
           return s + split_size(c, split_start, split_rows);
-        }
-      )
+        });
     }
   }
+  return sum;
+}
+
+void size_check(uint8_t* op, uint8_t* op_end, std::size_t incr)
+{
+  if (op + incr > op_end) {
+    throw std::logic_error("output buffer overflow");
+  }
+}
+
+std::pair<uint32_t, int>
+update_has_nulls_mask(host_column_view const& c, std::vector<uint32_t>& mask, uint32_t bits, int bit_index)
+{
+  if (c.has_nulls()) {
+    bits |= 1 << bit_index;
+  }
+  bit_index++;
+  if (bit_index == 32) {
+    mask.push_back(bits);
+    bit_index = 0;
+  }
+  if (c.num_children() > 0) {
+    switch (c.type().id()) {
+      case cudf::type_id::STRING:
+        // string offset column is skipped
+        break;
+      case cudf::type_id::LIST:
+        // list offset column is skipped
+        std::tie(bits, bit_index) = update_has_nulls_mask(c.lists_child(), mask, bits, bit_index);
+        break;
+      case cudf::type_id::STRUCT:
+        std::for_each(c.child_begin(), c.child_end(), [&](host_column_view const& c) {
+          std::tie(bits, bit_index) = update_has_nulls_mask(c, mask, bits, bit_index);
+        });
+        break;
+      default:
+        type_error(c.type().id());
+    }
+  }
+  return std::make_pair(bits, bit_index);
+}
+
+std::vector<uint32_t> compute_has_nulls_mask(host_table_view const& t)
+{
+  std::vector<uint32_t> mask;
+  if (t.num_rows() > 0) {
+    uint32_t bits = 0;
+    int bit_index = 0;
+    std::for_each(t.begin(), t.end(), [&](host_column_view const& c) {
+      std::tie(bits, bit_index) = update_has_nulls_mask(c, mask, bits, bit_index);
+    });
+    if (bit_index != 0) {
+      mask.push_back(bits);
+    }
+    // add padding for row_count + mask_bytes if necessary
+    auto mask_byte_size = mask.size() * sizeof(mask[0]);
+    auto header_size = sizeof(cudf::size_type) + mask_byte_size;
+    auto padded_size = pad_size(header_size);
+    if (padded_size != header_size) {
+      if (padded_size - header_size != sizeof(mask[0])) {
+        throw std::logic_error("incorrect validity mask padding");
+      }
+      mask.push_back(0);
+    }
+  }
+  return mask;
+}
+
+uint8_t* add_split_data(host_table_view const& t, cudf::size_type split_start, cudf::size_type split_end,
+                        uint8_t* out, uint8_t* out_end)
+{
+  // todo
+  return nullptr;
+}
+
+uint8_t* single_split_on_host(host_table_view const& t, std::vector<uint32_t> const& has_nulls_mask,
+                              cudf::size_type split_start, cudf::size_type split_end, uint8_t* out, uint8_t* out_end)
+{
+  cudf::size_type num_split_rows = split_end - split_start;
+  // write the common header parts, total size will be filled in at the end
+  size_check(out, out_end, EMPTY_HEADER_SIZE);
+  auto header_p = reinterpret_cast<cudf::size_type*>(out);
+  header_p[1] = num_split_rows;
+  auto op = out + EMPTY_HEADER_SIZE;
+  if (num_split_rows > 0) {
+    auto has_nulls_mask_byte_size = has_nulls_mask.size() * sizeof(has_nulls_mask[0]);
+    size_check(op, out_end, has_nulls_mask_byte_size);
+    std::memcpy(op, has_nulls_mask.data(), has_nulls_mask_byte_size);
+    op += has_nulls_mask_byte_size;
+    op = add_split_data(t, split_start, split_end, op, out_end);
+  }
+  // fill in the total size now that it is known
+  auto size = op - out;
+  if (size > std::numeric_limits<cudf::size_type>::max()) {
+    throw std::runtime_error("maximum split size exceeded");
+  }
+  header_p[0] = size;
+  return op;
+}
+
+std::vector<int64_t> split_on_host(host_table_view const& t, uint8_t* out, std::size_t out_size,
+                                   cudf::jni::native_jintArray const& split_indices)
+{
+  auto const num_splits = split_indices.size();
+  std::vector<int64_t> offsets;
+  offsets.reserve(num_splits);
+  auto op = out;
+  auto const op_end = out + out_size;
+  auto has_nulls_mask = compute_has_nulls_mask(t);
+  for (int i = 0; i < num_splits; i++) {
+    cudf::size_type split_start = static_cast<cudf::size_type>(split_indices[i]);
+    cudf::size_type split_end = (i == num_splits - 1)
+      ? t.num_rows() : static_cast<cudf::size_type>(split_indices[i + 1]);
+    op = single_split_on_host(t, has_nulls_mask, split_start, split_end, op, op_end);
+    offsets.push_back(op - out);
+  }
+  if (op != op_end) {
+    throw std::logic_error("output buffer not fully used");
+  }
+  return offsets;
 }
 
 }  // anonymous namespace
@@ -277,30 +427,30 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemb
 }
 
 JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemble_splitOnHostSize(
-  JNIEnv* env, jclass, jlong jhost_table, jlong data_address, jlong data_size,
-  jlongArray jsplit_indices)
+  JNIEnv* env, jclass, jlong jhost_table, jintArray jsplit_indices)
 {
   JNI_NULL_CHECK(env, jhost_table, "table is null", 0);
   JNI_NULL_CHECK(env, jsplit_indices, "indices is null", 0);
   try {
     auto t = reinterpret_cast<spark_rapids_jni::host_table_view const*>(jhost_table);
-    auto bp = reinterpret_cast<uint8_t const*>(data_address);
-    auto bp_end = bp + data_size;
     cudf::jni::native_jintArray split_indices(env, jsplit_indices);
-    return static_cast<jlong>(split_on_host_size(*t, bp, bp_end, split_indices));
+    return static_cast<jlong>(split_on_host_size(*t, split_indices));
   }
   CATCH_STD(env, 0);
 }
 
 JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemble_splitOnHost(
-  JNIEnv* env, jclass, jlong jhost_table, jlong data_address, jlong dest_address, jlong dest_size)
+  JNIEnv* env, jclass, jlong jhost_table, jlong dest_address, jlong dest_size,
+  jintArray jsplit_indices)
 {
-  JNI_NULL_CHECK(env, jhost_table, "table is null", 0);
+  JNI_NULL_CHECK(env, jhost_table, "table is null", nullptr);
+  JNI_NULL_CHECK(env, jsplit_indices, "indices is null", nullptr);
+  JNI_NULL_CHECK(env, dest_address, "dest is null", nullptr);
   try {
     auto t = reinterpret_cast<spark_rapids_jni::host_table_view const*>(jhost_table);
-    auto src_ptr = reinterpret_cast<uint8_t const*>(data_address);
     auto dst_ptr = reinterpret_cast<uint8_t*>(dest_address);
-    auto split_offsets = split_on_host(*t, src_ptr, dst_ptr, static_cast<std::size_t>(dest_size));
+    cudf::jni::native_jintArray split_indices(env, jsplit_indices);
+    auto split_offsets = split_on_host(*t, dst_ptr, static_cast<std::size_t>(dest_size), split_indices);
     return cudf::jni::native_jlongArray(env, split_offsets).get_jArray();
   }
   CATCH_STD(env, nullptr);
