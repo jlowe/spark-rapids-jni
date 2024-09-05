@@ -228,6 +228,7 @@ std::size_t split_size(host_column_view const& c, cudf::size_type split_start, c
           [split_start, split_rows](std::size_t s, host_column_view const& child) {
             return s + split_size(child, split_start, split_rows);
           });
+        break;
       default:
         type_error(c.type().id());
     }
@@ -366,24 +367,93 @@ uint8_t* copy_validity(cudf::bitmask_type const* mask, cudf::size_type split_sta
   return op;
 }
 
-uint8_t* add_split_data(host_column_view const& c, cudf::size_type split_start, cudf::size_type split_end,
-                        uint8_t* out, uint8_t* out_end)
+uint8_t* copy_data(host_column_view const& c, cudf::size_type split_start, cudf::size_type split_end,
+                   uint8_t* out, uint8_t* out_end)
+{
+  auto op = out;
+  auto data = c.data<uint8_t const>();
+  auto dtype = c.type();
+  if (data != nullptr) {
+    uint8_t const* src = nullptr;
+    std::size_t size = 0;
+    if (cudf::is_fixed_width(dtype)) {
+      auto type_size = cudf::size_of(dtype);
+      src = data + (split_start * type_size);
+      size = (split_end - split_start) * type_size;
+    } else if (dtype.id() == cudf::type_id::STRING) {
+      auto split_rows = split_end - split_start;
+      auto [chars_start, chars_size] = get_offsets_split_info(c.strings_offsets(), split_start, split_rows);
+      src = data + chars_start;
+      size = chars_size;
+    } else {
+      type_error(dtype.id());
+    }
+    auto padded_size = pad_size(size);
+    size_check(op, out_end, padded_size);
+    std::memcpy(op, src, size);
+    op += size;
+    for (std::size_t i = 0; i < padded_size - size; i++) {
+      *op++ = 0;
+    }
+  }
+  return op;
+}
+
+uint8_t* copy_offsets(host_column_view const& c, cudf::size_type split_start, cudf::size_type split_end,
+                      uint8_t* out, uint8_t* out_end)
+{
+  auto op = out;
+  auto num_rows = split_end - split_start;
+  if (num_rows > 0 && c.num_children() > 0) {
+    switch(c.type().id()) {
+      case cudf::type_id::STRING:
+        // Need one more offset entry than number of rows in column
+        op = copy_data(c.strings_offsets(), split_start, split_end + 1, op, out_end);
+        break;
+      case cudf::type_id::LIST:
+        // Need one more offset entry than number of rows in column
+        op = copy_data(c.lists_offsets(), split_start, split_end + 1, op, out_end);
+        break;
+      case cudf::type_id::STRUCT:
+        // no offsets to copy
+        break;
+      default:
+        type_error(c.type().id());
+    }
+  }
+  return op;
+}
+
+uint8_t* single_split_on_host(host_column_view const& c, cudf::size_type split_start, cudf::size_type split_end,
+                              uint8_t* out, uint8_t* out_end)
 {
   auto op = out;
   if (c.has_nulls()) {
     op = copy_validity(c.null_mask(), split_start, split_end, op, out_end);
   }
-  todo
-  return op;
-}
-
-uint8_t* add_split_data(host_table_view const& t, cudf::size_type split_start, cudf::size_type split_end,
-                        uint8_t* out, uint8_t* out_end)
-{
-  auto op = out;
-  std::for_each(t.begin(), t.end(), [=, &op](host_column_view const& c) {
-    op = add_split_data(c, split_start, split_end, op, out_end);
-  });
+  op = copy_offsets(c, split_start, split_end, op, out_end);
+  op = copy_data(c, split_start, split_end, op, out_end);
+  if (c.num_children() > 0) {
+    switch(c.type().id()) {
+      case cudf::type_id::LIST:
+      {
+        auto split_rows = split_end - split_start;
+        auto [child_split_start, child_split_rows] = get_offsets_split_info(c.lists_offsets(), split_start, split_rows);
+        op = single_split_on_host(c.lists_child(), child_split_start, child_split_start + child_split_rows, op, out_end);
+        break;
+      }
+      case cudf::type_id::STRUCT:
+        std::for_each(c.child_begin(), c.child_end(), [=, &op](host_column_view const& c) {
+          op = single_split_on_host(c, split_start, split_end, op, out_end);
+        });
+        break;
+      case cudf::type_id::STRING:
+        // offsets were copied above, nothing left to do.
+        break;
+      default:
+        type_error(c.type().id());
+    }
+  }
   return op;
 }
 
@@ -401,7 +471,9 @@ uint8_t* single_split_on_host(host_table_view const& t, std::vector<uint32_t> co
     size_check(op, out_end, has_nulls_mask_byte_size);
     std::memcpy(op, has_nulls_mask.data(), has_nulls_mask_byte_size);
     op += has_nulls_mask_byte_size;
-    op = add_split_data(t, split_start, split_end, op, out_end);
+    std::for_each(t.begin(), t.end(), [=, &op](host_column_view const& c) {
+      op = single_split_on_host(c, split_start, split_end, op, out_end);
+    });
   }
   // fill in the total size now that it is known
   auto size = op - out;
