@@ -25,6 +25,7 @@
 #include <rmm/device_buffer.hpp>
 #include <rmm/device_uvector.hpp>
 
+#include <arpa/inet.h>
 #include <cstring>
 #include <limits>
 #include <tuple>
@@ -322,21 +323,47 @@ std::vector<uint32_t> compute_has_nulls_mask(host_table_view const& t)
 }
 
 uint8_t* copy_validity(cudf::bitmask_type const* mask, cudf::size_type split_start, cudf::size_type split_end,
-                       uint8_t* op, uint8_t* op_end)
+                       uint8_t* out, uint8_t* out_end)
 {
   auto num_rows = split_end - split_start;
-  static_assert(sizeof(cudf::bitmask_type) == 4, "bitmask copy needs update");
   auto num_mask_bytes = (num_rows + 7) / 8;
   auto padded_size = pad_size(num_mask_bytes);
-  size_check(op, op_end, padded_size);
+  size_check(out, out_end, padded_size);
+  auto op = out;
   if (split_start % 8 == 0) {
-    std::memcpy(op, mask, num_mask_bytes);
+    auto mask_start = reinterpret_cast<uint8_t const*>(mask) + (split_start/8);
+    std::memcpy(op, mask_start, num_mask_bytes);
+    op += num_mask_bytes;
     for (std::size_t i = 0; i < padded_size - num_mask_bytes; i++) {
       *op++ = 0;
     }
   } else {
-    todo
+    // TODO: consider adding SSE/AVX/NEON versions of this
+    auto const bits_per_word = sizeof(cudf::bitmask_type) * 8;
+    auto const num_input_mask_words = ((split_end - 1) / bits_per_word) - (split_start / bits_per_word) + 1;
+    if (num_input_mask_words > 0) {
+      auto imp = mask + (split_start / bits_per_word);
+      auto omp = reinterpret_cast<cudf::bitmask_type*>(op);
+      int const shift = split_start % bits_per_word;
+      int const merge_shift = shift + bits_per_word;
+      static_assert(bits_per_word == 32, "bitmask shifted copy needs update");
+      uint64_t bits = htonl(*imp++) >> shift;
+      for (std::size_t i = 0; i < num_input_mask_words - 1; i++) {
+        bits |= htonl(*imp++) << merge_shift;
+        *omp++ = ntohl(static_cast<cudf::bitmask_type>(bits));
+        bits >>= 32;
+      }
+      *omp++ = ntohl(static_cast<cudf::bitmask_type>(bits));
+      if (num_input_mask_words % 2 != 0) {
+        *omp++ = 0;
+      }
+      op = reinterpret_cast<uint8_t*>(omp);
+    }
   }
+  if (static_cast<std::size_t>(op - out) != padded_size) {
+    throw std::logic_error("validity copy buffer error");
+  }
+  return op;
 }
 
 uint8_t* add_split_data(host_column_view const& c, cudf::size_type split_start, cudf::size_type split_end,
