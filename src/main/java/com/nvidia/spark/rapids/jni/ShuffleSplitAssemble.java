@@ -110,9 +110,9 @@ public class ShuffleSplitAssemble {
     throw new UnsupportedOperationException();
   }
 
-  public static HostMemoryBuffer concatOnHost(int[] metadata,
-                                              HostMemoryBuffer parts,
-                                              long[] partOffsets) {
+  public static HostTable concatToHostTable(int[] metadata,
+                                            HostMemoryBuffer parts,
+                                            long[] partOffsets) {
     throw new UnsupportedOperationException();
   }
 
@@ -139,4 +139,5 @@ public class ShuffleSplitAssemble {
   private static native long splitOnHostSize(long host_table_handle, int[] splitIndices);
   private static native long[] splitOnHost(long host_table_handle, long dest_address, long dest_size,
                                            int[] splitIndices);
+  private static native long[] concatOnHost(long bufferAddr, long)
 }
