@@ -87,9 +87,9 @@ public class ShuffleSplitAssemble {
 
   public static HostSplitResult splitOnHost(HostTable table,
                                             int[] splitIndices) {
-    long hostSize = splitOnHostSize(table.getTableHandle(), splitIndices);
+    long hostSize = splitOnHostSize(table.getNativeTableView(), splitIndices);
     try (HostMemoryBuffer hmb = HostMemoryBuffer.allocate(hostSize, false)) {
-      long[] offsets = splitOnHost(table.getTableHandle(), hmb.getAddress(),
+      long[] offsets = splitOnHost(table.getNativeTableView(), hmb.getAddress(),
           hostSize, splitIndices);
       hmb.incRefCount();
       return new HostSplitResult(hmb, offsets);
