@@ -113,7 +113,14 @@ public class ShuffleSplitAssemble {
   public static HostTable concatToHostTable(int[] metadata,
                                             HostMemoryBuffer parts,
                                             long[] partOffsets) {
-    throw new UnsupportedOperationException();
+    long hostSize = concatToHostTableSize(metadata, parts.getAddress(), parts.getLength(),
+        partOffsets);
+    try (HostMemoryBuffer hmb = HostMemoryBuffer.allocate(hostSize)) {
+      long tableViewHandle  = concatToHostTable(metadata, parts.getAddress(), parts.getLength(),
+          partOffsets, hmb.getAddress(), hmb.getLength());
+      hmb.incRefCount();
+      return new HostTable(tableViewHandle, hmb);
+    }
   }
 
   public static HostMemoryBuffer concatOnHost(int[] metadata, HostMemoryBuffer... parts) {
@@ -139,4 +146,8 @@ public class ShuffleSplitAssemble {
   private static native long splitOnHostSize(long host_table_handle, int[] splitIndices);
   private static native long[] splitOnHost(long host_table_handle, long dest_address, long dest_size,
                                            int[] splitIndices);
+  private static native long concatToHostTableSize(int[] metadata, long bufferAddr,
+                                                   long bufferSize, long[] offsets);
+  private static native long concatToHostTable(int[] metadata, long bufferAddr, long bufferSize,
+                                               long[] offsets, long destAddr, long destSize);
 }

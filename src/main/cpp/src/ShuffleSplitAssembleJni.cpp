@@ -139,16 +139,20 @@ std::size_t num_total_columns(host_table_view const& t)
     [](std::size_t sum, host_column_view const& c) { return sum + num_total_columns(c); });
 }
 
-std::size_t non_empty_header_size(host_table_view const& t)
+std::size_t non_empty_header_size(std::size_t num_columns)
 {
   // header is:
-  //   - 4 byte total split size
   //   - 4 byte row count
   //   - null mask presence for each column, one bit per column in depth-first traversal
-  // padded to multiple of 8 bytes not including initial total size
-  std::size_t null_mask_presence_size = (num_total_columns(t) + 7) / 8;
+  // padded to multiple of 8 bytes
+  std::size_t null_mask_presence_size = (num_columns + 7) / 8;
   std::size_t prepadded_size = 4 + null_mask_presence_size;
-  return 4 + pad_size(prepadded_size);
+  return pad_size(prepadded_size);
+}
+
+std::size_t non_empty_header_size(host_table_view const& t)
+{
+  return non_empty_header_size(num_total_columns(t));
 }
 
 std::size_t get_data_size(host_column_view const& c, cudf::size_type split_start, cudf::size_type num_rows)
@@ -232,7 +236,8 @@ std::size_t split_on_host_size(host_table_view const& t, cudf::jni::native_jintA
   if (t.num_rows() == 0) {
     return EMPTY_HEADER_SIZE * split_indices.size();
   }
-  auto single_header_size = non_empty_header_size(t);
+  // total size prepended to normal header
+  auto single_header_size = 4 + non_empty_header_size(t);
   std::size_t sum = 0;
   for (int i = 0; i < split_indices.size() - 1; i++) {
     auto split_start = static_cast<cudf::size_type>(split_indices[i]);
@@ -494,6 +499,54 @@ std::vector<int64_t> split_on_host(host_table_view const& t, uint8_t* out, std::
   return offsets;
 }
 
+std::vector<uint32_t> combine_has_nulls_masks(uint8_t const* buffer,
+                                              cudf::jni::native_jlongArray offsets,
+                                              int total_columns)
+{
+  std::vector<uint32_t> has_nulls_mask(total_columns, 0);
+  for (int i = 0; i < total_columns; i++) {
+    // nulls mask is after row count in each header
+    auto mask = reinterpret_cast<uint32_t const*>(buffer + offsets[i] + 4);
+    std::transform(has_nulls_mask.cbegin(), has_nulls_mask.cend(), mask, has_nulls_mask.begin(),
+      [](uint32_t x, uint32_t y) { return x | y; });
+  }
+  return has_nulls_mask;
+}
+
+std::pair<std::size_t, int>
+concat_to_host_table_column_size(cudf::jni::native_jintArray meta, int column_index,
+                                 bool has_nulls, uint8_t const* buffer, std::size_t buffer_size,
+                                 std::vector<uint8_t const*> part_ptrs)
+{
+  std::size_t size = 0;
+
+}
+
+std::size_t concat_to_host_table_size(cudf::jni::native_jintArray meta, uint8_t const* buffer,
+                                      std::size_t buffer_size, cudf::jni::native_jlongArray offsets)
+{
+  if (meta.size() % 2 != 0) {
+    throw std::logic_error("metadata size is odd");
+  }
+  int total_columns = meta.size() / 2;
+  auto has_nulls_mask = combine_has_nulls_masks(buffer, offsets, total_columns);
+  std::vector<uint8_t const*> part_ptrs;
+  part_ptrs.reserve(offsets.size());
+  auto header_size = non_empty_header_size(total_columns);
+  std::transform(offsets.begin(), offsets.end(), std::back_inserter(part_ptrs),
+    [=](jlong offset) { return buffer_size + offset + header_size; });
+  std::size_t sum = 0;
+  int column_index = 0;
+  while (column_index != total_columns) {
+    auto has_nulls = has_nulls_mask[column_index / 32] & (column_index % 32);
+    auto [column_size, next_column_index] =
+      concat_to_host_table_column_size(meta, column_index, has_nulls, buffer, buffer_size, part_ptrs);
+    column_index = next_column_index;
+    sum += column_size;
+  }
+  return sum;
+}
+
 }  // anonymous namespace
 
 extern "C" {
@@ -573,6 +626,22 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemb
     return cudf::jni::native_jlongArray(env, split_offsets).get_jArray();
   }
   CATCH_STD(env, nullptr);
+}
+
+JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemble_concatToHostTableSize(
+  JNIEnv* env, jclass, jintArray jmeta, jlong jbuffer_addr, jlong jbuffer_size, jlongArray joffsets)
+{
+  JNI_NULL_CHECK(env, jmeta, "meta is null", 0);
+  JNI_NULL_CHECK(env, jbuffer_addr, "buffer is null", 0);
+  JNI_NULL_CHECK(env, joffsets, "offsets is null", 0);
+  try {
+    cudf::jni::native_jintArray meta(env, jmeta);
+    cudf::jni::native_jlongArray offsets(env, joffsets);
+    auto buffer = reinterpret_cast<uint8_t const*>(jbuffer_addr);
+    auto buffer_size = static_cast<std::size_t>(jbuffer_size);
+    return static_cast<jlong>(concat_to_host_table_size(meta, buffer, buffer_size, offsets));
+  }
+  CATCH_STD(env, 0);
 }
 
 }  // extern "C"

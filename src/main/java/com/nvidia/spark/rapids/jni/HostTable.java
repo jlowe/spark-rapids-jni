@@ -82,7 +82,7 @@ public class HostTable implements AutoCloseable {
     return fromTable(table, Cuda.DEFAULT_STREAM);
   }
 
-  private HostTable(long tableHandle, HostMemoryBuffer hostBuffer) {
+  HostTable(long tableHandle, HostMemoryBuffer hostBuffer) {
     this.nativeTableView = tableHandle;
     this.hostBuffer = hostBuffer;
   }
