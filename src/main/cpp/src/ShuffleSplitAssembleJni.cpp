@@ -622,11 +622,8 @@ std::vector<column_concat_meta> build_column_concat_meta(cudf::jni::native_jintA
   return concat_meta;
 }
 
-std::size_t concat_to_host_table_size(cudf::jni::native_jintArray const& meta, uint8_t const* buffer,
-                                      std::size_t buffer_size,
-                                      cudf::jni::native_jlongArray const& offsets)
+std::size_t concat_to_host_table_size(std::vector<column_concat_meta> const& concat_meta)
 {
-  auto concat_meta = build_column_concat_meta(meta, buffer, buffer_size, offsets);
   return std::accumulate(concat_meta.cbegin(), concat_meta.cend(), 0,
     [](std::size_t sum, column_concat_meta const& c) {
       sum += pad_size(c.data_size);
@@ -638,6 +635,14 @@ std::size_t concat_to_host_table_size(cudf::jni::native_jintArray const& meta, u
       }
       return sum;
     });
+}
+
+std::unique_ptr<host_table_view> concat_to_host_table(std::vector<column_concat_meta> const& concat_meta,
+                                                      uint8_t const* buffer, std::size_t buffer_size,
+                                                      cudf::jni::native_jlongArray const& offsets,
+                                                      uint8_t* dest_buffer, std::size_t dest_buffer_size)
+{
+  throw std::runtime_error("not implemented yet");
 }
 
 }  // anonymous namespace
@@ -721,7 +726,8 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemb
   CATCH_STD(env, nullptr);
 }
 
-JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemble_concatToHostTableSize(
+JNIEXPORT jlong JNICALL
+Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemble_buildConcatToHostTableMeta(
   JNIEnv* env, jclass, jintArray jmeta, jlong jbuffer_addr, jlong jbuffer_size, jlongArray joffsets)
 {
   JNI_NULL_CHECK(env, jmeta, "meta is null", 0);
@@ -732,7 +738,52 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemble_co
     cudf::jni::native_jlongArray offsets(env, joffsets);
     auto buffer = reinterpret_cast<uint8_t const*>(jbuffer_addr);
     auto buffer_size = static_cast<std::size_t>(jbuffer_size);
-    return static_cast<jlong>(concat_to_host_table_size(meta, buffer, buffer_size, offsets));
+    auto concatMeta = std::make_unique<std::vector<column_concat_meta>>(build_column_concat_meta(meta, buffer, buffer_size, offsets));
+    return cudf::jni::release_as_jlong(concatMeta);
+  }
+  CATCH_STD(env, 0);
+}
+
+JNIEXPORT void JNICALL
+Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemble_freeConcatToHostTableMeta(
+  JNIEnv* env, jclass, jlong jmeta)
+{
+  JNI_NULL_CHECK(env, jmeta, "meta is null", );
+  try {
+    auto meta = reinterpret_cast<std::vector<column_concat_meta>*>(jmeta);
+    delete meta;
+  }
+  CATCH_STD(env, );
+}
+
+JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemble_concatToHostTableSize(
+  JNIEnv* env, jclass, jlong jmeta)
+{
+  JNI_NULL_CHECK(env, jmeta, "meta is null", 0);
+  try {
+    auto concat_meta = reinterpret_cast<std::vector<column_concat_meta> const*>(jmeta);
+    return static_cast<jlong>(concat_to_host_table_size(*concat_meta));
+  }
+  CATCH_STD(env, 0);
+}
+
+JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemble_concatToHostTable(
+  JNIEnv* env, jclass, jintArray jmeta, jlong jbuffer_addr, jlong jbuffer_size, jlongArray joffsets,
+  jlong jdest_buffer_addr, jlong jdest_buffer_size)
+{
+  JNI_NULL_CHECK(env, jmeta, "meta is null", 0);
+  JNI_NULL_CHECK(env, jbuffer_addr, "buffer is null", 0);
+  JNI_NULL_CHECK(env, joffsets, "offsets is null", 0);
+  JNI_NULL_CHECK(env, jdest_buffer_addr, "dest is null", 0);
+  try {
+    auto concat_meta = reinterpret_cast<std::vector<column_concat_meta> const*>(jmeta);
+    cudf::jni::native_jlongArray offsets(env, joffsets);
+    auto buffer = reinterpret_cast<uint8_t const*>(jbuffer_addr);
+    auto buffer_size = static_cast<std::size_t>(jbuffer_size);
+    auto dest_buffer = reinterpret_cast<uint8_t*>(jdest_buffer_addr);
+    auto dest_buffer_size = static_cast<std::size_t>(jdest_buffer_size);
+    return cudf::jni::release_as_jlong(
+      concat_to_host_table(*concat_meta, buffer, buffer_size, offsets, dest_buffer, dest_buffer_size));
   }
   CATCH_STD(env, 0);
 }

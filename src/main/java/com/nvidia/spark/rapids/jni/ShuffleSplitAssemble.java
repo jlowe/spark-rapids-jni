@@ -113,13 +113,19 @@ public class ShuffleSplitAssemble {
   public static HostTable concatToHostTable(int[] metadata,
                                             HostMemoryBuffer parts,
                                             long[] partOffsets) {
-    long hostSize = concatToHostTableSize(metadata, parts.getAddress(), parts.getLength(),
+    long concatMeta = buildConcatToHostTableMeta(metadata, parts.getAddress(), parts.getLength(),
         partOffsets);
-    try (HostMemoryBuffer hmb = HostMemoryBuffer.allocate(hostSize)) {
-      long tableViewHandle  = concatToHostTable(metadata, parts.getAddress(), parts.getLength(),
-          partOffsets, hmb.getAddress(), hmb.getLength());
-      hmb.incRefCount();
-      return new HostTable(tableViewHandle, hmb);
+    try {
+      long hostSize = concatToHostTableSize(concatMeta);
+      try (HostMemoryBuffer hmb = HostMemoryBuffer.allocate(hostSize)) {
+        long tableViewHandle  = concatToHostTable(concatMeta,
+            parts.getAddress(), parts.getLength(),
+            partOffsets, hmb.getAddress(), hmb.getLength());
+        hmb.incRefCount();
+        return new HostTable(tableViewHandle, hmb);
+      }
+    } finally {
+      freeConcatToHostTableMeta(concatMeta);
     }
   }
 
@@ -146,8 +152,10 @@ public class ShuffleSplitAssemble {
   private static native long splitOnHostSize(long host_table_handle, int[] splitIndices);
   private static native long[] splitOnHost(long host_table_handle, long dest_address, long dest_size,
                                            int[] splitIndices);
-  private static native long concatToHostTableSize(int[] metadata, long bufferAddr,
-                                                   long bufferSize, long[] offsets);
-  private static native long concatToHostTable(int[] metadata, long bufferAddr, long bufferSize,
+  private static native long buildConcatToHostTableMeta(int[] metadata, long bufferAddr,
+                                                        long bufferSize, long[] offsets);
+  private static native void freeConcatToHostTableMeta(long metaHandle);
+  private static native long concatToHostTableSize(long concatToHostMeta);
+  private static native long concatToHostTable(long concatToHostMeta, long bufferAddr, long bufferSize,
                                                long[] offsets, long destAddr, long destSize);
 }
