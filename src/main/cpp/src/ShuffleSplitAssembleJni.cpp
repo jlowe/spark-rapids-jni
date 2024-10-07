@@ -36,8 +36,8 @@
 #include <cudf/types.hpp>
 namespace spark_rapids_jni {
 struct shuffle_split_col_data {
+  cudf::data_type dtype;
   cudf::size_type num_children;
-  cudf::type_id type;
 };
 
 struct shuffle_split_metadata {
@@ -101,9 +101,25 @@ spark_rapids_jni::shuffle_split_metadata to_metadata(JNIEnv* env, jintArray jmet
   std::vector<spark_rapids_jni::shuffle_split_col_data> result;
   result.reserve(metadata.size());
   for (int i = 0; i < metadata.size(); i += 2) {
-    auto num_children = metadata[i];
-    auto type_id = static_cast<cudf::type_id>(metadata[i+1]);
-    result.push_back({num_children, type_id});
+    auto type_id = static_cast<cudf::type_id>(metadata[i]);
+    cudf::data_type dtype(type_id);
+    auto num_children = 0;
+    switch (type_id) {
+      case cudf::type_id::STRUCT:
+        num_children = metadata[i + 1];
+        break;
+      case cudf::type_id::LIST:
+        num_children = 1;
+        break;
+      case cudf::type_id::DECIMAL32: [[fallthrough]];
+      case cudf::type_id::DECIMAL64: [[fallthrough]];
+      case cudf::type_id::DECIMAL128:
+        dtype = cudf::data_type(type_id, metadata[i + 1]);
+        break;
+      default:
+        break;
+    }
+    result.push_back({dtype, num_children});
   }
   metadata.cancel();
   return spark_rapids_jni::shuffle_split_metadata{std::move(result)};
@@ -499,52 +515,129 @@ std::vector<int64_t> split_on_host(host_table_view const& t, uint8_t* out, std::
   return offsets;
 }
 
-std::vector<uint32_t> combine_has_nulls_masks(uint8_t const* buffer,
-                                              cudf::jni::native_jlongArray offsets,
-                                              int total_columns)
+struct column_concat_meta {
+  std::size_t data_size;
+  int num_rows;
+  int num_children;
+  cudf::data_type dtype;
+  bool has_nulls;
+
+  column_concat_meta(cudf::data_type dt, int num_child)
+    : data_size(0), num_rows(0), num_children(num_child), dtype(dt), has_nulls(false) {}
+};
+
+std::pair<int, uint8_t const*>
+update_column_concat_meta(std::vector<column_concat_meta>& meta, int num_rows,
+                          uint32_t const* has_nulls_mask, int column_index, uint8_t const* buffer)
 {
-  std::vector<uint32_t> has_nulls_mask(total_columns, 0);
-  for (int i = 0; i < total_columns; i++) {
-    // nulls mask is after row count in each header
-    auto mask = reinterpret_cast<uint32_t const*>(buffer + offsets[i] + 4);
-    std::transform(has_nulls_mask.cbegin(), has_nulls_mask.cend(), mask, has_nulls_mask.begin(),
-      [](uint32_t x, uint32_t y) { return x | y; });
+  column_concat_meta& column_meta = meta[column_index];
+  column_meta.num_rows += num_rows;
+  bool has_validity = has_nulls_mask[column_index / 32] & (column_index % 32);
+  if (has_validity) {
+    column_meta.has_nulls = true;
+    buffer += pad_size((num_rows + 7)/8);
   }
-  return has_nulls_mask;
+  column_index += 1;
+  if (num_rows > 0) {
+    switch (column_meta.dtype.id()) {
+      case cudf::type_id::STRING:
+      case cudf::type_id::LIST:
+      {
+        auto offsets = reinterpret_cast<uint32_t const*>(buffer);
+        buffer += pad_size((num_rows + 1) * sizeof(uint32_t));
+        auto child_rows = offsets[num_rows] - offsets[0];
+        if (column_meta.dtype.id() == cudf::type_id::STRING) {
+          column_meta.data_size += child_rows;
+        } else {
+          return update_column_concat_meta(meta, child_rows, has_nulls_mask, column_index, buffer);
+        }
+        break;
+      }
+      case cudf::type_id::STRUCT:
+      {
+        for (int child_index = 0; child_index < column_meta.num_children; child_index++) {
+          auto [next_column_index, next_buffer] = update_column_concat_meta(meta, num_rows,
+            has_nulls_mask, column_index, buffer);
+          column_index = next_column_index;
+          buffer = next_buffer;
+        }
+        break;
+      }
+      default:
+        column_meta.data_size += cudf::size_of(column_meta.dtype) * num_rows;
+        break;
+    }
+  }
+  return std::make_pair(column_index, buffer);
 }
 
-std::pair<std::size_t, int>
-concat_to_host_table_column_size(cudf::jni::native_jintArray meta, int column_index,
-                                 bool has_nulls, uint8_t const* buffer, std::size_t buffer_size,
-                                 std::vector<uint8_t const*> part_ptrs)
-{
-  std::size_t size = 0;
-
-}
-
-std::size_t concat_to_host_table_size(cudf::jni::native_jintArray meta, uint8_t const* buffer,
-                                      std::size_t buffer_size, cudf::jni::native_jlongArray offsets)
+std::vector<column_concat_meta> build_column_concat_meta(cudf::jni::native_jintArray const& meta, uint8_t const* buffer,
+                                                         std::size_t buffer_size,
+                                                         cudf::jni::native_jlongArray const& offsets)
 {
   if (meta.size() % 2 != 0) {
     throw std::logic_error("metadata size is odd");
   }
   int total_columns = meta.size() / 2;
-  auto has_nulls_mask = combine_has_nulls_masks(buffer, offsets, total_columns);
-  std::vector<uint8_t const*> part_ptrs;
-  part_ptrs.reserve(offsets.size());
-  auto header_size = non_empty_header_size(total_columns);
-  std::transform(offsets.begin(), offsets.end(), std::back_inserter(part_ptrs),
-    [=](jlong offset) { return buffer_size + offset + header_size; });
-  std::size_t sum = 0;
-  int column_index = 0;
-  while (column_index != total_columns) {
-    auto has_nulls = has_nulls_mask[column_index / 32] & (column_index % 32);
-    auto [column_size, next_column_index] =
-      concat_to_host_table_column_size(meta, column_index, has_nulls, buffer, buffer_size, part_ptrs);
-    column_index = next_column_index;
-    sum += column_size;
+  std::vector<column_concat_meta> concat_meta;
+  concat_meta.reserve(total_columns);
+  for (int i = 0; i < total_columns; i++) {
+    auto type_id = static_cast<cudf::type_id>(meta[i * 2]);
+    cudf::data_type dtype(type_id);
+    auto num_children = 0;
+    switch (type_id) {
+      case cudf::type_id::STRUCT:
+        num_children = meta[(i * 2) + 1];
+        break;
+      case cudf::type_id::LIST:
+        num_children = 1;
+        break;
+      case cudf::type_id::DECIMAL32: [[fallthrough]];
+      case cudf::type_id::DECIMAL64: [[fallthrough]];
+      case cudf::type_id::DECIMAL128:
+        dtype = cudf::data_type(type_id, meta[(i * 2) + 1]);
+        num_children = 0;
+        break;
+      default:
+        num_children = 0;
+        break;
+    }
+    concat_meta.emplace_back(dtype, num_children);
   }
-  return sum;
+  std::for_each(offsets.begin(), offsets.end(), [=, &meta, &concat_meta](jlong offset) {
+    auto part_buffer = buffer + offset;
+    auto word_ptr = reinterpret_cast<uint32_t const*>(part_buffer);
+    auto num_rows = *word_ptr++;
+    auto has_nulls_mask = word_ptr;
+    // move past header
+    part_buffer += pad_size(4 + (total_columns + 7)/8);
+    int column_index = 0;
+    while (column_index != total_columns) {
+      auto [next_column_index, next_buffer] =
+        update_column_concat_meta(concat_meta, num_rows, has_nulls_mask, column_index, part_buffer);
+      column_index = next_column_index;
+      part_buffer = next_buffer;
+    }
+  });
+  return concat_meta;
+}
+
+std::size_t concat_to_host_table_size(cudf::jni::native_jintArray const& meta, uint8_t const* buffer,
+                                      std::size_t buffer_size,
+                                      cudf::jni::native_jlongArray const& offsets)
+{
+  auto concat_meta = build_column_concat_meta(meta, buffer, buffer_size, offsets);
+  return std::accumulate(concat_meta.cbegin(), concat_meta.cend(), 0,
+    [](std::size_t sum, column_concat_meta const& c) {
+      sum += pad_size(c.data_size);
+      if (c.has_nulls) {
+        sum += pad_size((c.num_rows + 7)/8);
+      }
+      if (c.num_rows > 0 && (c.dtype.id() == cudf::type_id::STRING || c.dtype.id() == cudf::type_id::LIST)) {
+        sum += pad_size((c.num_rows + 1) * 4);
+      }
+      return sum;
+    });
 }
 
 }  // anonymous namespace
