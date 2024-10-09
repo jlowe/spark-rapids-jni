@@ -638,121 +638,68 @@ std::size_t concat_to_host_table_size(std::vector<column_concat_meta> const& con
     });
 }
 
-std::tuple<host_column_view, int, uint8_t*>
-to_host_column_view(std::vector<column_concat_meta> const& concat_meta, int column_index,
-                    uint8_t* bp, uint8_t* bp_end)
+struct column_concat_tracker {
+  int num_rows;
+  int num_children;
+  uint8_t* next_data;
+  cudf::bitmask_type* validity_start;
+  cudf::size_type* offsets_start;
+  uint8_t* data_start;
+
+  column_concat_tracker(int num_child, cudf::bitmask_type* null_mask, cudf::size_type* offsets, uint8_t* data)
+    : num_rows(0), num_children(num_child), next_data(data),
+      validity_start(null_mask), offsets_start(offsets), data_start(data) {}
+};
+
+std::pair<column_concat_tracker, uint8_t*>
+to_column_concat_tracker(column_concat_meta const& m, uint8_t* bp, uint8_t* bp_end)
 {
-  column_concat_meta const& column_meta = concat_meta[column_index];
   cudf::bitmask_type* null_mask = nullptr;
   cudf::size_type* offsets = nullptr;
-  void* data = nullptr;
-  if (column_meta.num_rows > 0) {
-    if (column_meta.has_nulls) {
+  uint8_t* data = nullptr;
+  if (m.num_rows > 0) {
+    if (m.has_nulls) {
       null_mask = reinterpret_cast<cudf::bitmask_type*>(bp);
-      bp += cudf::bitmask_allocation_size_bytes(column_meta.num_rows);
+      bp += cudf::bitmask_allocation_size_bytes(m.num_rows);
     }
-    switch (column_meta.dtype.id()) {
+    switch (m.dtype.id()) {
       case cudf::type_id::STRING: [[falthrough]];
       case cudf::type_id::LIST:
         offsets = reinterpret_cast<cudf::size_type*>(bp);
-        bp += (column_meta.num_rows + 1) * sizeof(cudf::size_type);
+        bp += (m.num_rows + 1) * sizeof(cudf::size_type);
         break;
       default:
         break;
     }
-    if (column_meta.data_size > 0) {
+    if (m.data_size > 0) {
       data = bp;
-      bp += column_meta.data_size;
+      bp += m.data_size;
     }
   }
   if (bp > bp_end) {
     throw std::logic_error("buffer overrun");
   }
-  column_index += 1;
-  std::vector<host_column_view> children;
-  if (offsets != nullptr) {
-    if (num_children != 1) {
-      throw std::logic_error("bad child count");
-    }
-    children.push_back(host_column_view(
-      cudf::data_type(cudf::type_id::INT32), column_meta.num_rows + 1, offsets));
-  } else {
-    for (int child_index = 0; child_index < column_meta.num_children; child_index++) {
-      auto [child_view, next_column_index, next_bp] =
-        to_host_column_view(concat_meta, column_index, bp, bp_end);
-      children.push_back(child_view);
-      column_index = next_column_index;
-      bp = next_bp;
-    }
-  }
-  host_column_view column_view(column_meta.dtype, column_meta.num_rows, data, null_mask,)
-  return std::make_tuple()
-}
-
-std::vector<host_column_view>
-to_host_column_views(std::vector<column_concat_meta> const& concat_meta,
-                     uint8_t* dest_buffer, std::size_t dest_buffer_size)
-{
-  int total_columns = concat_meta.size();
-  std::vector<host_column_view> column_views;
-  column_views.reserve(total_columns);
-  auto bp = dest_buffer;
-  auto bp_end = dest_buffer + dest_buffer_size;
-  int column_index = 0;
-  while (column_index != total_columns) {
-    auto [column_view, next_column_index, next_bp] =
-      to_host_column_view(concat_meta, column_index, bp, bp_end);
-    column_views.push_back(column_view);
-    column_index = next_column_index;
-    bp = next_bp;
-  }
-  return column_views;
-}
-
-struct column_concat_tracker {
-  int num_rows;
-  int num_children;
-  int null_count;
-  cudf::bitmask_type* validity;
-  cudf::size_type* offsets;
-  uint8_t* data;
-};
-
-void convert_to_column_concat_trackers(host_column_view const& c,
-                                       std::vector<column_concat_tracker>& trackers) {
-  auto validity = c.null_mask();
-  auto offsets = nullptr;
-  switch (c.type().id()) {
-    case cudf::type_id::STRING:
-      offsets = c.strings_offsets().data<cudf::size_type>();
-      break;
-    case cudf::type_id::LIST:
-      offsets = c.lists_offsets().data<cudf::size_type>();
-      break;
-    default:
-      break;
-  }
-  auto data = c.data<uint8_t>();
-  auto num_children = static_cast<int>(c.num_children());
-  trackers.push_back(column_concat_tracker{0, num_children, validity, offsets, data, num_children});
-  std::for_each(c.child_begin(), c.child_end(), [&](host_column_view const& child) {
-    convert_to_column_concat_trackers(child, trackers);
-  });
+  return std::make_pair(column_concat_tracker(m.num_children, null_mask, offsets, data), bp);
 }
 
 std::vector<column_concat_tracker>
-to_column_concat_trackers(std::size_t total_columns,
-                          std::vector<host_column_view> const& column_views)
+to_column_concat_trackers(std::vector<column_concat_meta> const& metas, uint8_t* dest_buffer,
+                          std::size_t dest_buffer_size)
 {
+  auto bp = dest_buffer;
+  auto bp_end = dest_buffer + dest_buffer_size;
   std::vector<column_concat_tracker> trackers;
-  trackers.reserve(total_columns);
-  std::for_each(column_views.cbegin(), column_views.cend(), [&](host_column_view const& c) {
-    convert_to_column_concat_trackers(c, trackers);
-  });
+  trackers.reserve(metas.size());
+  std::transform(metas.cbegin(), metas.cend(), std::back_inserter(trackers),
+    [&](column_concat_meta const& m) {
+      auto [tracker, next_bp] = to_column_concat_tracker(m, bp, bp_end);
+      bp = next_bp;
+      return tracker;
+    });
   return trackers;
 }
 
-void copy_validity_part(cudf::bitmask_type* dest, cudf::bitmask_type* src, int dest_start_bit,
+void copy_validity_part(cudf::bitmask_type* dest, cudf::bitmask_type const* src, int dest_start_bit,
                    int num_bits)
 {
   if (dest_start_bit > 0) {
@@ -790,7 +737,6 @@ void fill_validity_part(cudf::bitmask_type* dest, int dest_start_bit, int num_bi
   // fill in any partial starting word
   if (dest_start_bit > 0) {
     if (num_bits < NULL_MASK_WORD_BITS - dest_start_bit) {
-      auto bits = *dest++;
       *dest |= ((1 << num_bits) - 1) << dest_start_bit;
       return;
     } else {
@@ -811,22 +757,23 @@ void fill_validity_part(cudf::bitmask_type* dest, int dest_start_bit, int num_bi
 
 std::pair<int, uint8_t const*>
 copy_column_part(std::vector<column_concat_tracker>& trackers, uint32_t num_rows,
-                 uint32_t const* has_nulls_mask, int column_index, uint8_t const* bp)
+                 uint32_t const* has_nulls_mask, std::size_t column_index, uint8_t const* bp)
 {
-  column_concat_tracker const& tracker = trackers[column_index];
-  if (tracker.validity != nullptr) {
+  column_concat_tracker& tracker = trackers[column_index];
+  if (tracker.validity_start != nullptr) {
+    auto dest_validity = tracker.validity_start + (tracker.num_rows / NULL_MASK_WORD_BITS);
     auto dest_start_bit = tracker.num_rows % NULL_MASK_WORD_BITS;
     if (has_nulls_mask[column_index / 32] & (column_index % 32)) {
       auto src_validity = reinterpret_cast<uint32_t const*>(bp);
       bp += pad_size((num_rows + 7) / 8);
-      copy_validity_part(tracker.validity, src_validity, dest_start_bit, num_rows);
+      copy_validity_part(dest_validity, src_validity, dest_start_bit, num_rows);
     } else {
-      fill_validity_part(tracker.validity, dest_start_bit, num_rows);
+      fill_validity_part(dest_validity, dest_start_bit, num_rows);
     }
-    tracker.validity += ((tracker.num_rows % 32) + num_rows) / 32;
   }
   // copy offsets here
   // copy data here
+  tracker.num_rows += num_rows;
   column_index += 1;
   // recurse to children here
   return std::make_pair(column_index, bp);
@@ -838,16 +785,15 @@ std::unique_ptr<host_table_view> concat_to_host_table(std::vector<column_concat_
                                                       uint8_t* dest_buffer, std::size_t dest_buffer_size)
 {
   auto total_columns = concat_meta.size();
-  auto column_views = to_host_column_views(concat_meta);
-  auto column_trackers = to_column_concat_trackers(concat_meta.size(), column_views);
-  std::for_each(column_views.cbegin(), column_views.cend(), [=, &column_trackers](jlong offset) {
+  auto column_trackers = to_column_concat_trackers(concat_meta, dest_buffer, dest_buffer_size);
+  std::for_each(offsets.begin(), offsets.end(), [=, &column_trackers](jlong offset) {
     auto part_buffer = buffer + offset;
     auto word_ptr = reinterpret_cast<uint32_t const*>(part_buffer);
     auto num_rows = *word_ptr++;
     auto has_nulls_mask = word_ptr;
     // move past header
     part_buffer += pad_size(4 + (total_columns + 7)/8);
-    int column_index = 0;
+    std::size_t column_index = 0;
     while (column_index != total_columns) {
       auto [next_column_index, next_buffer] =
         copy_column_data(column_trackers, num_rows, has_nulls_mask, column_index, part_buffer);
@@ -855,6 +801,8 @@ std::unique_ptr<host_table_view> concat_to_host_table(std::vector<column_concat_
       part_buffer = next_buffer;
     }
   });
+  convert trackers to views
+  build host table view
 }
 
 }  // anonymous namespace
