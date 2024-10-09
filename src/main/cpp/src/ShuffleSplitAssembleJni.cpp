@@ -637,12 +637,66 @@ std::size_t concat_to_host_table_size(std::vector<column_concat_meta> const& con
     });
 }
 
+std::tuple<host_column_view, int, uint8_t*>
+to_host_column_view(std::vector<column_concat_meta> const& concat_meta, int column_index,
+                    uint8_t* bp, uint8_t* bp_end)
+{
+  column_concat_meta const& column_meta = concat_meta[column_index];
+  cudf::bitmask_type* null_mask = nullptr;
+  if (column_meta.num_rows > 0) {
+    if (column_meta.has_nulls) {
+      null_mask = reinterpret_cast<cudf::bitmask_type*>(bp);
+      bp += cudf::bitmask_allocation_size_bytes(column_meta.num_rows);
+    }
+    cudf::size_type* offsets = nullptr;
+    switch (column_meta.dtype.id()) {
+      case cudf::type_id::STRING: [[falthrough]];
+      case cudf::type_id::LIST:
+        offsets = reinterpret_cast<cudf::size_type*>(bp);
+        bp += (column_meta.num_rows + 1) * sizeof(cudf::size_type)
+        break;
+      default:
+        break;
+    }
+    void* data = nullptr;
+    if (column_meta.data_size > 0) {
+      data = bp;
+      bp += column_meta.data_size;
+    }
+  }
+  std::vector<host_column_view> children;
+  for (int child_index = 0; child_index < column_meta.num_children; child_index++) {
+
+  }
+}
+
+std::vector<host_column_view>
+to_host_column_views(std::vector<column_concat_meta> const& concat_meta,
+                     uint8_t* dest_buffer, std::size_t dest_buffer_size)
+{
+  int total_columns = concat_meta.size();
+  std::vector<host_column_view> column_views;
+  column_views.reserve(total_columns);
+  auto bp = dest_buffer;
+  auto bp_end = dest_buffer + dest_buffer_size;
+  int column_index = 0;
+  while (column_index != total_columns) {
+    auto [column_view, next_column_index, next_bp] =
+      to_host_column_view(concat_meta, column_index, bp, bp_end);
+    column_views.push_back(column_view);
+    column_index = next_column_index;
+    bp = next_bp;
+  }
+  return column_views;
+}
+
 std::unique_ptr<host_table_view> concat_to_host_table(std::vector<column_concat_meta> const& concat_meta,
                                                       uint8_t const* buffer, std::size_t buffer_size,
                                                       cudf::jni::native_jlongArray const& offsets,
                                                       uint8_t* dest_buffer, std::size_t dest_buffer_size)
 {
-  throw std::runtime_error("not implemented yet");
+  auto column_views = to_host_column_views(concat_meta);
+
 }
 
 }  // anonymous namespace
