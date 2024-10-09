@@ -690,13 +690,79 @@ to_host_column_views(std::vector<column_concat_meta> const& concat_meta,
   return column_views;
 }
 
+struct column_concat_tracker {
+  int num_rows;
+  int num_children;
+  cudf::bitmask_type* validity;
+  cudf::size_type* offsets;
+  uint8_t* data;
+};
+
+void convert_to_column_concat_trackers(host_column_view const& c,
+                                       std::vector<column_concat_tracker>& trackers) {
+  auto validity = c.null_mask();
+  auto offsets = nullptr;
+  switch (c.type().id()) {
+    case cudf::type_id::STRING:
+      offsets = c.strings_offsets().data<cudf::size_type>();
+      break;
+    case cudf::type_id::LIST:
+      offsets = c.lists_offsets().data<cudf::size_type>();
+      break;
+    default:
+      break;
+  }
+  auto data = c.data<uint8_t>();
+  auto num_children = static_cast<int>(c.num_children());
+  trackers.push_back(column_concat_tracker{0, num_children, validity, offsets, data, num_children});
+  std::for_each(c.child_begin(), c.child_end(), [&](host_column_view const& child) {
+    convert_to_column_concat_trackers(child, trackers);
+  });
+}
+
+std::vector<column_concat_tracker>
+to_column_concat_trackers(std::size_t total_columns,
+                          std::vector<host_column_view> const& column_views)
+{
+  std::vector<column_concat_tracker> trackers;
+  trackers.reserve(total_columns);
+  std::for_each(column_views.cbegin(), column_views.cend(), [&](host_column_view const& c) {
+    convert_to_column_concat_trackers(c, trackers);
+  });
+  return trackers;
+}
+
+std::pair<int, uint8_t const*>
+copy_column_data(std::vector<column_concat_tracker>& trackers, uint32_t num_rows,
+                 uint32_t const* has_nulls_mask, int column_index, uint8_t const* bp)
+{
+  column_concat_tracker const& tracker = trackers[column_index];
+  ....
+}
+
 std::unique_ptr<host_table_view> concat_to_host_table(std::vector<column_concat_meta> const& concat_meta,
                                                       uint8_t const* buffer, std::size_t buffer_size,
                                                       cudf::jni::native_jlongArray const& offsets,
                                                       uint8_t* dest_buffer, std::size_t dest_buffer_size)
 {
+  auto total_columns = concat_meta.size();
   auto column_views = to_host_column_views(concat_meta);
-
+  auto column_trackers = to_column_concat_trackers(concat_meta.size(), column_views);
+  std::for_each(column_views.cbegin(), column_views.cend(), [=, &column_trackers](jlong offset) {
+    auto part_buffer = buffer + offset;
+    auto word_ptr = reinterpret_cast<uint32_t const*>(part_buffer);
+    auto num_rows = *word_ptr++;
+    auto has_nulls_mask = word_ptr;
+    // move past header
+    part_buffer += pad_size(4 + (total_columns + 7)/8);
+    int column_index = 0;
+    while (column_index != total_columns) {
+      auto [next_column_index, next_buffer] =
+        copy_column_data(column_trackers, num_rows, has_nulls_mask, column_index, part_buffer);
+      column_index = next_column_index;
+      part_buffer = next_buffer;
+    }
+  });
 }
 
 }  // anonymous namespace
