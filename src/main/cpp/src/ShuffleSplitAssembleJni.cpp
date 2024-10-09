@@ -25,7 +25,6 @@
 #include <rmm/device_buffer.hpp>
 #include <rmm/device_uvector.hpp>
 
-#include <arpa/inet.h>
 #include <cstring>
 #include <limits>
 #include <tuple>
@@ -80,6 +79,8 @@ using spark_rapids_jni::host_table_view;
 
 // pad all data buffer sizes to a multiple of 8 to make copying the data easier on the GPU
 constexpr static int PAD_SIZE = 8;
+
+constexpr static int NULL_MASK_WORD_BITS = sizeof(cudf::bitmask_type) * 8;
 
 std::size_t pad_size(std::size_t s)
 {
@@ -360,13 +361,13 @@ uint8_t* copy_validity(cudf::bitmask_type const* mask, cudf::size_type split_sta
       int const shift = split_start % bits_per_word;
       int const merge_shift = shift + bits_per_word;
       static_assert(bits_per_word == 32, "bitmask shifted copy needs update");
-      uint64_t bits = htonl(*imp++) >> shift;
+      uint64_t bits = *imp++ >> shift;
       for (std::size_t i = 0; i < num_input_mask_words - 1; i++) {
-        bits |= htonl(*imp++) << merge_shift;
-        *omp++ = ntohl(static_cast<cudf::bitmask_type>(bits));
+        bits |= *imp++ << merge_shift;
+        *omp++ = static_cast<cudf::bitmask_type>(bits);
         bits >>= 32;
       }
-      *omp++ = ntohl(static_cast<cudf::bitmask_type>(bits));
+      *omp++ = static_cast<cudf::bitmask_type>(bits);
       if (num_input_mask_words % 2 != 0) {
         *omp++ = 0;
       }
@@ -643,31 +644,49 @@ to_host_column_view(std::vector<column_concat_meta> const& concat_meta, int colu
 {
   column_concat_meta const& column_meta = concat_meta[column_index];
   cudf::bitmask_type* null_mask = nullptr;
+  cudf::size_type* offsets = nullptr;
+  void* data = nullptr;
   if (column_meta.num_rows > 0) {
     if (column_meta.has_nulls) {
       null_mask = reinterpret_cast<cudf::bitmask_type*>(bp);
       bp += cudf::bitmask_allocation_size_bytes(column_meta.num_rows);
     }
-    cudf::size_type* offsets = nullptr;
     switch (column_meta.dtype.id()) {
       case cudf::type_id::STRING: [[falthrough]];
       case cudf::type_id::LIST:
         offsets = reinterpret_cast<cudf::size_type*>(bp);
-        bp += (column_meta.num_rows + 1) * sizeof(cudf::size_type)
+        bp += (column_meta.num_rows + 1) * sizeof(cudf::size_type);
         break;
       default:
         break;
     }
-    void* data = nullptr;
     if (column_meta.data_size > 0) {
       data = bp;
       bp += column_meta.data_size;
     }
   }
-  std::vector<host_column_view> children;
-  for (int child_index = 0; child_index < column_meta.num_children; child_index++) {
-
+  if (bp > bp_end) {
+    throw std::logic_error("buffer overrun");
   }
+  column_index += 1;
+  std::vector<host_column_view> children;
+  if (offsets != nullptr) {
+    if (num_children != 1) {
+      throw std::logic_error("bad child count");
+    }
+    children.push_back(host_column_view(
+      cudf::data_type(cudf::type_id::INT32), column_meta.num_rows + 1, offsets));
+  } else {
+    for (int child_index = 0; child_index < column_meta.num_children; child_index++) {
+      auto [child_view, next_column_index, next_bp] =
+        to_host_column_view(concat_meta, column_index, bp, bp_end);
+      children.push_back(child_view);
+      column_index = next_column_index;
+      bp = next_bp;
+    }
+  }
+  host_column_view column_view(column_meta.dtype, column_meta.num_rows, data, null_mask,)
+  return std::make_tuple()
 }
 
 std::vector<host_column_view>
@@ -693,6 +712,7 @@ to_host_column_views(std::vector<column_concat_meta> const& concat_meta,
 struct column_concat_tracker {
   int num_rows;
   int num_children;
+  int null_count;
   cudf::bitmask_type* validity;
   cudf::size_type* offsets;
   uint8_t* data;
@@ -732,12 +752,84 @@ to_column_concat_trackers(std::size_t total_columns,
   return trackers;
 }
 
+void copy_validity_part(cudf::bitmask_type* dest, cudf::bitmask_type* src, int dest_start_bit,
+                   int num_bits)
+{
+  if (dest_start_bit > 0) {
+    if (num_bits < NULL_MASK_WORD_BITS - dest_start_bit) {
+      *dest |= (*src & ((1 << num_bits) - 1)) << dest_start_bit;
+    } else {
+      // TODO: consider adding SSE/AVX/NEON versions of this
+      static_assert(NULL_MASK_WORD_BITS == 32, "bitmask shifted copy needs update");
+      uint64_t bits = static_cast<uint64_t>(*src++) << dest_start_bit;
+      *dest++ |= static_cast<cudf::bitmask_type>(bits);
+      num_bits -= NULL_MASK_WORD_BITS - dest_start_bit;
+      while (num_bits >= NULL_MASK_WORD_BITS) {
+        bits >>= 32;
+        bits |= static_cast<uint64_t>(*src++) << dest_start_bit;
+        *dest++ = static_cast<cudf::bitmask_type>(bits);
+      }
+      if (num_bits > 0) {
+        *dest++ = static_cast<cudf::bitmask_type>(bits >> 32);
+      }
+    }
+  } else {
+    auto num_whole_words = num_bits / NULL_MASK_WORD_BITS;
+    std::memcpy(dest, src, num_whole_words * sizeof(cudf::bitmask_type));
+    src += num_whole_words;
+    dest += num_whole_words;
+    num_bits -= num_whole_words * NULL_MASK_WORD_BITS;
+    if (num_bits > 0) {
+      *dest = *src & ((1 << num_bits) - 1);
+    }
+  }
+}
+
+void fill_validity_part(cudf::bitmask_type* dest, int dest_start_bit, int num_bits)
+{
+  // fill in any partial starting word
+  if (dest_start_bit > 0) {
+    if (num_bits < NULL_MASK_WORD_BITS - dest_start_bit) {
+      auto bits = *dest++;
+      *dest |= ((1 << num_bits) - 1) << dest_start_bit;
+      return;
+    } else {
+      *dest++ |= (~0) << dest_start_bit;
+      num_bits -= NULL_MASK_WORD_BITS - dest_start_bit;
+    }
+  }
+  auto num_whole_words = num_bits / NULL_MASK_WORD_BITS;
+  if (num_whole_words > 0) {
+    std::memset(dest, 0xFF, num_whole_words * sizeof(cudf::bitmask_type));
+    dest += num_whole_words;
+    num_bits -= num_whole_words * NULL_MASK_WORD_BITS;
+  }
+  if (num_bits > 0) {
+    *dest = (1 << num_bits) - 1;
+  }
+}
+
 std::pair<int, uint8_t const*>
-copy_column_data(std::vector<column_concat_tracker>& trackers, uint32_t num_rows,
+copy_column_part(std::vector<column_concat_tracker>& trackers, uint32_t num_rows,
                  uint32_t const* has_nulls_mask, int column_index, uint8_t const* bp)
 {
   column_concat_tracker const& tracker = trackers[column_index];
-  ....
+  if (tracker.validity != nullptr) {
+    auto dest_start_bit = tracker.num_rows % NULL_MASK_WORD_BITS;
+    if (has_nulls_mask[column_index / 32] & (column_index % 32)) {
+      auto src_validity = reinterpret_cast<uint32_t const*>(bp);
+      bp += pad_size((num_rows + 7) / 8);
+      copy_validity_part(tracker.validity, src_validity, dest_start_bit, num_rows);
+    } else {
+      fill_validity_part(tracker.validity, dest_start_bit, num_rows);
+    }
+    tracker.validity += ((tracker.num_rows % 32) + num_rows) / 32;
+  }
+  // copy offsets here
+  // copy data here
+  column_index += 1;
+  // recurse to children here
+  return std::make_pair(column_index, bp);
 }
 
 std::unique_ptr<host_table_view> concat_to_host_table(std::vector<column_concat_meta> const& concat_meta,
