@@ -484,8 +484,8 @@ uint8_t* single_split_on_host(host_table_view const& t, std::vector<uint32_t> co
       op = single_split_on_host(c, split_start, num_rows, op, out_end);
     });
   }
-  // fill in the total size now that it is known
-  auto size = op - out;
+  // fill in the total size, without the leading size, now that it is known
+  auto size = op - out - 4;
   if (size > std::numeric_limits<cudf::size_type>::max()) {
     throw std::runtime_error("maximum split size exceeded");
   }
