@@ -818,6 +818,75 @@ copy_column_part(std::vector<column_concat_tracker>& trackers, uint32_t num_rows
   return std::make_pair(column_index, bp);
 }
 
+inline unsigned int popc32(uint32_t x)
+{
+  // TODO: Use popcnt instruction when available
+  x = x - ((x >> 1) & 0x55555555);
+  x = (x & 0x33333333) + ((x >> 2) & 0x33333333);
+  x = (x + (x >> 4)) & 0x0F0F0F0F;
+  return (x * 0x01010101) >> 24;
+}
+
+inline unsigned int count_zeros(cudf::bitmask_type bits)
+{
+  auto flipped = ~bits;
+  if (flipped == 0) {
+    return 0;
+  }
+  return popc32(flipped);
+}
+
+cudf::size_type count_nulls(cudf::bitmask_type const* validity, int num_rows)
+{
+  cudf::size_type null_count = 0;
+  int num_whole_words = num_rows / NULL_MASK_WORD_BITS;
+  for (int i = 0; i < num_whole_words; i++) {
+    null_count += count_zeros(validity[i]);
+  }
+  auto remaining_rows = num_rows % NULL_MASK_WORD_BITS;
+  if (remaining_rows != 0) {
+    cudf::bitmask_type bits = validity[num_whole_words];
+    // set all the bits that don't correspond to valid rows to 1
+    bits |= ~((1 << remaining_rows) - 1);
+    null_count += count_zeros(bits);
+  }
+  return null_count;
+}
+
+std::size_t convert_to_view(std::vector<column_concat_tracker> const& trackers, std::size_t column_index,
+                            std::vector<host_column_view> views)
+{
+  column_concat_tracker const& tracker = trackers[column_index];
+  column_index += 1;
+  auto null_count = 0;
+  if (tracker.validity_start != nullptr) {
+    null_count = count_nulls(tracker.validity_start, tracker.num_rows);
+  }
+  std::vector<host_column_view> child_views;
+  if (tracker.offsets_start != nullptr) {
+    child_views.push_back(host_column_view(cudf::data_type(cudf::type_id::INT32),
+      tracker.num_rows + 1, tracker.offsets_start, nullptr, 0));
+  } else {
+    for (int child_index = 0; child_index < tracker.num_children; child_index++) {
+      column_index = convert_to_view(trackers, column_index, child_views);
+    }
+  }
+  views.push_back(host_column_view(tracker.dtype, tracker.num_rows, tracker.data_start,
+    tracker.validity_start, null_count, child_views));
+  return column_index;
+}
+
+std::vector<host_column_view> to_host_column_views(std::vector<column_concat_tracker> const& trackers)
+{
+  std::vector<host_column_view> views;
+  views.reserve(trackers.size());
+  std::size_t column_index = 0;
+  while (column_index != trackers.size()) {
+    column_index = convert_to_view(trackers, column_index, views);
+  }
+  return views;
+}
+
 std::unique_ptr<host_table_view> concat_to_host_table(std::vector<column_concat_meta> const& concat_meta,
                                                       uint8_t const* buffer, std::size_t buffer_size,
                                                       cudf::jni::native_jlongArray const& offsets,
@@ -840,8 +909,8 @@ std::unique_ptr<host_table_view> concat_to_host_table(std::vector<column_concat_
       part_buffer = next_buffer;
     }
   });
-  convert trackers to views
-  build host table view
+  auto column_views = to_host_column_views(column_trackers);
+  return std::make_unique<host_table_view>(column_views);
 }
 
 }  // anonymous namespace
