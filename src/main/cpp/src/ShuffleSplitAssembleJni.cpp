@@ -639,6 +639,7 @@ std::size_t concat_to_host_table_size(std::vector<column_concat_meta> const& con
 }
 
 struct column_concat_tracker {
+  cudf::data_type dtype;
   int num_rows;
   int num_children;
   uint8_t* next_data;
@@ -646,8 +647,8 @@ struct column_concat_tracker {
   cudf::size_type* offsets_start;
   uint8_t* data_start;
 
-  column_concat_tracker(int num_child, cudf::bitmask_type* null_mask, cudf::size_type* offsets, uint8_t* data)
-    : num_rows(0), num_children(num_child), next_data(data),
+  column_concat_tracker(cudf::data_type type, int num_child, cudf::bitmask_type* null_mask, cudf::size_type* offsets, uint8_t* data)
+    : dtype(type), num_rows(0), num_children(num_child), next_data(data),
       validity_start(null_mask), offsets_start(offsets), data_start(data) {}
 };
 
@@ -679,7 +680,7 @@ to_column_concat_tracker(column_concat_meta const& m, uint8_t* bp, uint8_t* bp_e
   if (bp > bp_end) {
     throw std::logic_error("buffer overrun");
   }
-  return std::make_pair(column_concat_tracker(m.num_children, null_mask, offsets, data), bp);
+  return std::make_pair(column_concat_tracker(m.dtype, m.num_children, null_mask, offsets, data), bp);
 }
 
 std::vector<column_concat_tracker>
@@ -760,22 +761,60 @@ copy_column_part(std::vector<column_concat_tracker>& trackers, uint32_t num_rows
                  uint32_t const* has_nulls_mask, std::size_t column_index, uint8_t const* bp)
 {
   column_concat_tracker& tracker = trackers[column_index];
-  if (tracker.validity_start != nullptr) {
-    auto dest_validity = tracker.validity_start + (tracker.num_rows / NULL_MASK_WORD_BITS);
-    auto dest_start_bit = tracker.num_rows % NULL_MASK_WORD_BITS;
-    if (has_nulls_mask[column_index / 32] & (column_index % 32)) {
-      auto src_validity = reinterpret_cast<uint32_t const*>(bp);
-      bp += pad_size((num_rows + 7) / 8);
-      copy_validity_part(dest_validity, src_validity, dest_start_bit, num_rows);
-    } else {
-      fill_validity_part(dest_validity, dest_start_bit, num_rows);
+  cudf::size_type child_rows = 0;
+  if (num_rows > 0) {
+    if (tracker.validity_start != nullptr) {
+      auto dest_validity = tracker.validity_start + (tracker.num_rows / NULL_MASK_WORD_BITS);
+      auto dest_start_bit = tracker.num_rows % NULL_MASK_WORD_BITS;
+      if (has_nulls_mask[column_index / 32] & (column_index % 32)) {
+        auto src_validity = reinterpret_cast<uint32_t const*>(bp);
+        bp += pad_size((num_rows + 7) / 8);
+        copy_validity_part(dest_validity, src_validity, dest_start_bit, num_rows);
+      } else {
+        fill_validity_part(dest_validity, dest_start_bit, num_rows);
+      }
+    }
+    if (tracker.offsets_start != nullptr) {
+      auto src_offsets = reinterpret_cast<cudf::size_type const*>(bp);
+      bp += pad_size((num_rows + 1) * sizeof(cudf::size_type));
+      auto dest_offsets = tracker.offsets_start;
+      int num_offsets = num_rows + 1;
+      // src offsets may not be 0-based
+      cudf::size_type offset_adjust = -src_offsets[0];
+      child_rows = src_offsets[num_rows] - src_offsets[0];
+      if (tracker.num_rows > 0) {
+        // adding onto existing offsets, so skip the first source offset
+        src_offsets += 1;
+        dest_offsets += tracker.num_rows + 1;
+        num_offsets = num_rows;
+        offset_adjust += tracker.offsets_start[tracker.num_rows];
+      }
+      for (int i = 0; i < num_offsets; i++) {
+        dest_offsets[i] = src_offsets[i] + offset_adjust;
+      }
+    }
+    if (tracker.next_data != nullptr) {
+      std::size_t data_size = 0;
+      if (cudf::is_fixed_width(tracker.dtype)) {
+        data_size = cudf::size_of(tracker.dtype) * num_rows;
+      } else if (tracker.dtype.id() == cudf::type_id::STRING) {
+        data_size = child_rows;
+      } else {
+        type_error(tracker.dtype.id());
+      }
+      std::memcpy(tracker.next_data, bp, data_size);
+      tracker.next_data += data_size;
+      bp += pad_size(data_size);
     }
   }
-  // copy offsets here
-  // copy data here
   tracker.num_rows += num_rows;
   column_index += 1;
-  // recurse to children here
+  for (int child_index = 0; child_index < tracker.num_children; child_index++) {
+    auto [next_column_index, next_bp] =
+      copy_column_part(trackers, child_rows, has_nulls_mask, column_index, bp);
+    column_index = next_column_index;
+    bp = next_bp;
+  }
   return std::make_pair(column_index, bp);
 }
 
@@ -796,7 +835,7 @@ std::unique_ptr<host_table_view> concat_to_host_table(std::vector<column_concat_
     std::size_t column_index = 0;
     while (column_index != total_columns) {
       auto [next_column_index, next_buffer] =
-        copy_column_data(column_trackers, num_rows, has_nulls_mask, column_index, part_buffer);
+        copy_column_part(column_trackers, num_rows, has_nulls_mask, column_index, part_buffer);
       column_index = next_column_index;
       part_buffer = next_buffer;
     }
