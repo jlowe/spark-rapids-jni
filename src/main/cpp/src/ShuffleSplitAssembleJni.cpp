@@ -254,7 +254,8 @@ std::size_t split_on_host_size(host_table_view const& t, cudf::jni::native_jintA
     return EMPTY_HEADER_SIZE * split_indices.size();
   }
   // total size prepended to normal header
-  auto single_header_size = 4 + non_empty_header_size(t);
+  // 4-byte size precedes the normal header
+  auto split_header_size = non_empty_header_size(t) + 4;
   std::size_t sum = 0;
   for (int i = 0; i < split_indices.size(); i++) {
     auto split_start = static_cast<cudf::size_type>(split_indices[i]);
@@ -263,9 +264,9 @@ std::size_t split_on_host_size(host_table_view const& t, cudf::jni::native_jintA
     if (num_rows == 0) {
       sum += EMPTY_HEADER_SIZE;
     } else {
-      sum += std::accumulate(t.begin(), t.end(), single_header_size,
-        [num_rows, split_start](std::size_t s, host_column_view const& c) {
-          auto ss = split_size(c, split_start, num_rows) + 4;
+      sum += std::accumulate(t.begin(), t.end(), 0,
+        [num_rows, split_header_size, split_start](std::size_t s, host_column_view const& c) {
+          auto ss = split_size(c, split_start, num_rows) + split_header_size;
           std::cerr << "split size: " << ss << std::endl;
           return s + ss;
         });
