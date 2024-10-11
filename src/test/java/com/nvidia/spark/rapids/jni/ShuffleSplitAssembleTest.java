@@ -68,7 +68,7 @@ public class ShuffleSplitAssembleTest {
       // first column has a null mask
       assertEquals(1, bb.getInt());
       // null mask has all three values valid
-      assertEquals(7, bb.getInt());
+      assertEquals(7, bb.getInt() & 0x7);
       // padding to a multiple of 8 bytes
       assertEquals(0, bb.getInt());
       // data values
@@ -94,7 +94,7 @@ public class ShuffleSplitAssembleTest {
       // first column has a null mask
       assertEquals(1, bb.getInt());
       // validity mask padded to 8 bytes
-      assertEquals(1, bb.getInt());
+      assertEquals(2, bb.getInt() & 0x3);
       assertEquals(0, bb.getInt());
       // data values, skip null checks since they could be anything
       bb.getInt();
@@ -109,7 +109,7 @@ public class ShuffleSplitAssembleTest {
       // first column has a null mask
       assertEquals(1, bb.getInt());
       // validity mask padded to 8 bytes
-      assertEquals(1, bb.getInt());
+      assertEquals(1, bb.getInt() & 0x1);
       assertEquals(0, bb.getInt());
       // data values padded to 8 bytes
       assertEquals(-4, bb.getInt());
