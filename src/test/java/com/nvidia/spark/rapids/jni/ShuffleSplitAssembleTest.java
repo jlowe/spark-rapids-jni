@@ -62,10 +62,14 @@ public class ShuffleSplitAssembleTest {
       // Check partition 0
       assertEquals(0, offsets[0]);
       // total size of partition
-      assertEquals(24, bb.getInt());
+      assertEquals(32, bb.getInt());
       // row count
       assertEquals(3, bb.getInt());
-      // no null masks
+      // first column has a null mask
+      assertEquals(1, bb.getInt());
+      // null mask has all three values valid
+      assertEquals(7, bb.getInt());
+      // padding to a multiple of 8 bytes
       assertEquals(0, bb.getInt());
       // data values
       assertEquals(7, bb.getInt());
@@ -87,7 +91,7 @@ public class ShuffleSplitAssembleTest {
       assertEquals(24, bb.getInt());
       // row count
       assertEquals(2, bb.getInt());
-      // null mask is present
+      // first column has a null mask
       assertEquals(1, bb.getInt());
       // validity mask padded to 8 bytes
       assertEquals(1, bb.getInt());
@@ -99,10 +103,13 @@ public class ShuffleSplitAssembleTest {
       // Check partition 3
       assertEquals(bb.position(), offsets[3]);
       // total size of partition
-      assertEquals(20, bb.getInt());
+      assertEquals(24, bb.getInt());
       // row count
       assertEquals(1, bb.getInt());
-      // no null masks
+      // first column has a null mask
+      assertEquals(1, bb.getInt());
+      // validity mask padded to 8 bytes
+      assertEquals(1, bb.getInt());
       assertEquals(0, bb.getInt());
       // data values padded to 8 bytes
       assertEquals(-4, bb.getInt());
