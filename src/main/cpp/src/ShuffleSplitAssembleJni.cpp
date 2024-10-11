@@ -256,15 +256,18 @@ std::size_t split_on_host_size(host_table_view const& t, cudf::jni::native_jintA
   // total size prepended to normal header
   auto single_header_size = 4 + non_empty_header_size(t);
   std::size_t sum = 0;
-  for (int i = 0; i < split_indices.size() - 1; i++) {
+  for (int i = 0; i < split_indices.size(); i++) {
     auto split_start = static_cast<cudf::size_type>(split_indices[i]);
-    auto num_rows = static_cast<cudf::size_type>(split_indices[i + 1] - split_start);
+    auto split_end = (i < split_indices.size() - 1) ? split_indices[i + 1] : t.num_rows();
+    auto num_rows = split_end - split_start;
     if (num_rows == 0) {
       sum += EMPTY_HEADER_SIZE;
     } else {
       sum += std::accumulate(t.begin(), t.end(), single_header_size,
         [num_rows, split_start](std::size_t s, host_column_view const& c) {
-          return s + split_size(c, split_start, num_rows);
+          auto ss = split_size(c, split_start, num_rows) + 4;
+          std::cerr << "split size: " << ss << std::endl;
+          return s + ss;
         });
     }
   }
@@ -467,29 +470,13 @@ uint8_t* single_split_on_host(host_column_view const& c, cudf::size_type split_s
   return op;
 }
 
-uint8_t* single_split_on_host(host_table_view const& t, std::vector<uint32_t> const& has_nulls_mask,
-                              cudf::size_type split_start, cudf::size_type num_rows, uint8_t* out, uint8_t* out_end)
+uint8_t* single_split_on_host(host_table_view const& t, cudf::size_type split_start,
+                              cudf::size_type num_rows, uint8_t* out, uint8_t* out_end)
 {
-  // write the common header parts, total size will be filled in at the end
-  size_check(out, out_end, EMPTY_HEADER_SIZE);
-  auto header_p = reinterpret_cast<cudf::size_type*>(out);
-  header_p[1] = num_rows;
-  auto op = out + EMPTY_HEADER_SIZE;
-  if (num_rows > 0) {
-    auto has_nulls_mask_byte_size = has_nulls_mask.size() * sizeof(has_nulls_mask[0]);
-    size_check(op, out_end, has_nulls_mask_byte_size);
-    std::memcpy(op, has_nulls_mask.data(), has_nulls_mask_byte_size);
-    op += has_nulls_mask_byte_size;
-    std::for_each(t.begin(), t.end(), [=, &op](host_column_view const& c) {
-      op = single_split_on_host(c, split_start, num_rows, op, out_end);
-    });
-  }
-  // fill in the total size, without the leading size, now that it is known
-  auto size = op - out - 4;
-  if (size > std::numeric_limits<cudf::size_type>::max()) {
-    throw std::runtime_error("maximum split size exceeded");
-  }
-  header_p[0] = size;
+  auto op = out;
+  std::for_each(t.begin(), t.end(), [=, &op](host_column_view const& c) {
+    op = single_split_on_host(c, split_start, num_rows, op, out_end);
+  });
   return op;
 }
 
@@ -502,13 +489,27 @@ std::vector<int64_t> split_on_host(host_table_view const& t, uint8_t* out, std::
   auto op = out;
   auto const op_end = out + out_size;
   auto const has_nulls_mask = compute_has_nulls_mask(t);
+  auto const has_nulls_mask_bytesize = has_nulls_mask.size() * sizeof(uint32_t);
   for (int i = 0; i < num_splits; i++) {
+    offsets.push_back(op - out);
     cudf::size_type split_start = static_cast<cudf::size_type>(split_indices[i]);
     cudf::size_type split_end = (i == num_splits - 1)
       ? t.num_rows() : static_cast<cudf::size_type>(split_indices[i + 1]);
     auto const num_rows = split_end - split_start;
-    op = single_split_on_host(t, has_nulls_mask, split_start, num_rows, op, op_end);
-    offsets.push_back(op - out);
+    // start writing header bytes, total size filled in afterwards
+    size_check(op, op_end, EMPTY_HEADER_SIZE);
+    auto header = reinterpret_cast<uint32_t*>(op);
+    auto op_start = op;
+    op += EMPTY_HEADER_SIZE;
+    header[1] = num_rows;
+    if (num_rows > 0) {
+      size_check(op, op_end, has_nulls_mask_bytesize);
+      std::memcpy(op, has_nulls_mask.data(), has_nulls_mask_bytesize);
+      op += has_nulls_mask_bytesize;
+      op = single_split_on_host(t, split_start, num_rows, op, op_end);
+    }
+    header[0] = op - op_start - 4;  // do not count 4 bytes in header for total size
+    std::cerr << "Finished split at offset " << op - out << std::endl;
   }
   if (op != op_end) {
     throw std::logic_error("output buffer not fully used");
