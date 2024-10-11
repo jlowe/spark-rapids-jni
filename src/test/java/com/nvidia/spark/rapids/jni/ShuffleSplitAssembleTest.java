@@ -37,13 +37,6 @@ public class ShuffleSplitAssembleTest {
          HostSplitResult sr = ShuffleSplitAssemble.splitOnHost(ht, splitIndices)) {
       assertEquals(splitIndices.length, sr.getOffsets().length);
       HostMemoryBuffer buffer = sr.getBuffer();
-
-      StringBuilder sb = new StringBuilder();
-      for (int i = 0; i < buffer.getLength(); i++) {
-        sb.append(String.format("%02x", buffer.getByte(i)));
-      }
-      System.out.println(sb.toString());
-
       int emptyHeaderSize = 8;
       assertEquals(splitIndices.length * emptyHeaderSize, buffer.getLength());
       ByteBuffer bb = buffer.asByteBuffer();
@@ -53,6 +46,69 @@ public class ShuffleSplitAssembleTest {
         // row count should be zero
         assertEquals(0, bb.getInt());
       }
+    }
+  }
+
+  @Test
+  void testSimpleSplit() {
+    int[] splitIndices = new int[]{0, 3, 3, 5};
+    try (Table t = new Table.TestBuilder().column(7, 9, 1, null, -1, -4).build();
+         HostTable ht = HostTable.fromTable(t, Cuda.DEFAULT_STREAM);
+         HostSplitResult sr = ShuffleSplitAssemble.splitOnHost(ht, splitIndices)) {
+      long[] offsets = sr.getOffsets();
+      assertEquals(splitIndices.length, offsets.length);
+      HostMemoryBuffer buffer = sr.getBuffer();
+      ByteBuffer bb = buffer.asByteBuffer();
+      // Check partition 0
+      assertEquals(0, offsets[0]);
+      // total size of partition
+      assertEquals(24, bb.getInt());
+      // row count
+      assertEquals(3, bb.getInt());
+      // no null masks
+      assertEquals(0, bb.getInt());
+      // data values
+      assertEquals(7, bb.getInt());
+      assertEquals(9, bb.getInt());
+      assertEquals(1, bb.getInt());
+      // padding to a multiple of 8 bytes
+      assertEquals(0, bb.getInt());
+
+      // Check partition 1
+      assertEquals(bb.position(), offsets[1]);
+      // total size of partition
+      assertEquals(4, bb.getInt());
+      // row count
+      assertEquals(0, bb.getInt());
+
+      // Check partition 2
+      assertEquals(bb.position(), offsets[2]);
+      // total size of partition
+      assertEquals(24, bb.getInt());
+      // row count
+      assertEquals(2, bb.getInt());
+      // null mask is present
+      assertEquals(1, bb.getInt());
+      // validity mask padded to 8 bytes
+      assertEquals(1, bb.getInt());
+      assertEquals(0, bb.getInt());
+      // data values, skip null checks since they could be anything
+      bb.getInt();
+      assertEquals(-1, bb.getInt());
+
+      // Check partition 3
+      assertEquals(bb.position(), offsets[3]);
+      // total size of partition
+      assertEquals(20, bb.getInt());
+      // row count
+      assertEquals(1, bb.getInt());
+      // no null masks
+      assertEquals(0, bb.getInt());
+      // data values padded to 8 bytes
+      assertEquals(-4, bb.getInt());
+      assertEquals(0, bb.getInt());
+
+      assertEquals(0, bb.remaining());
     }
   }
 
