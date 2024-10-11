@@ -50,6 +50,16 @@ public class ShuffleSplitAssembleTest {
   }
 
   @Test
+  void testEmptyRoundTrip() {
+    int[] splitIndices = new int[]{0, 0, 0};
+    try (ColumnVector c0 = ColumnVector.fromInts();
+         Table t = new Table(c0);
+         HostTable ht = HostTable.fromTable(t, Cuda.DEFAULT_STREAM)) {
+
+    }
+  }
+
+  @Test
   void testSimpleSplit() {
     int[] splitIndices = new int[]{0, 3, 3, 5};
     try (Table t = new Table.TestBuilder().column(7, 9, 1, null, -1, -4).build();
@@ -116,16 +126,6 @@ public class ShuffleSplitAssembleTest {
       assertEquals(0, bb.getInt());
 
       assertEquals(0, bb.remaining());
-    }
-  }
-
-  @Test
-  void testEmptyRoundTrip() {
-    int[] splitIndices = new int[]{0, 0, 0};
-    try (ColumnVector c0 = ColumnVector.fromInts();
-         Table t = new Table(c0);
-         HostTable ht = HostTable.fromTable(t, Cuda.DEFAULT_STREAM)) {
-
     }
   }
 }
