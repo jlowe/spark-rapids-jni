@@ -267,7 +267,6 @@ std::size_t split_on_host_size(host_table_view const& t, cudf::jni::native_jintA
       sum += std::accumulate(t.begin(), t.end(), 0,
         [num_rows, split_header_size, split_start](std::size_t s, host_column_view const& c) {
           auto ss = split_size(c, split_start, num_rows) + split_header_size;
-          std::cerr << "split size: " << ss << std::endl;
           return s + ss;
         });
     }
@@ -510,7 +509,6 @@ std::vector<int64_t> split_on_host(host_table_view const& t, uint8_t* out, std::
       op = single_split_on_host(t, split_start, num_rows, op, op_end);
     }
     header[0] = op - op_start - 4;  // do not count 4 bytes in header for total size
-    std::cerr << "Finished split at offset " << op - out << std::endl;
   }
   if (op != op_end) {
     throw std::logic_error("output buffer not fully used");
@@ -856,7 +854,7 @@ cudf::size_type count_nulls(cudf::bitmask_type const* validity, int num_rows)
 }
 
 std::size_t convert_to_view(std::vector<column_concat_tracker> const& trackers, std::size_t column_index,
-                            std::vector<host_column_view> views)
+                            std::vector<host_column_view>& views)
 {
   column_concat_tracker const& tracker = trackers[column_index];
   column_index += 1;
@@ -1042,9 +1040,9 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemble_co
   jlong jdest_buffer_addr, jlong jdest_buffer_size)
 {
   JNI_NULL_CHECK(env, jmeta, "meta is null", 0);
-  JNI_NULL_CHECK(env, jbuffer_addr, "buffer is null", 0);
+  JNI_NULL_CHECK(env, jbuffer_addr || jbuffer_addr == 0, "buffer is null", 0);
   JNI_NULL_CHECK(env, joffsets, "offsets is null", 0);
-  JNI_NULL_CHECK(env, jdest_buffer_addr, "dest is null", 0);
+  JNI_NULL_CHECK(env, jdest_buffer_size || jdest_buffer_size == 0, "dest is null", 0);
   try {
     auto concat_meta = reinterpret_cast<std::vector<column_concat_meta> const*>(jmeta);
     cudf::jni::native_jlongArray offsets(env, joffsets);

@@ -16,10 +16,7 @@
 
 package com.nvidia.spark.rapids.jni;
 
-import ai.rapids.cudf.ColumnVector;
-import ai.rapids.cudf.Cuda;
-import ai.rapids.cudf.HostMemoryBuffer;
-import ai.rapids.cudf.Table;
+import ai.rapids.cudf.*;
 import com.nvidia.spark.rapids.jni.ShuffleSplitAssemble.HostSplitResult;
 import org.junit.jupiter.api.Test;
 
@@ -35,12 +32,13 @@ public class ShuffleSplitAssembleTest {
          Table t = new Table(c0);
          HostTable ht = HostTable.fromTable(t, Cuda.DEFAULT_STREAM);
          HostSplitResult sr = ShuffleSplitAssemble.splitOnHost(ht, splitIndices)) {
-      assertEquals(splitIndices.length, sr.getOffsets().length);
+      long[] offsets = sr.getOffsets();
+      assertEquals(splitIndices.length, offsets.length);
       HostMemoryBuffer buffer = sr.getBuffer();
-      int emptyHeaderSize = 8;
-      assertEquals(splitIndices.length * emptyHeaderSize, buffer.getLength());
       ByteBuffer bb = buffer.asByteBuffer();
+      int emptyHeaderSize = 8;
       for (int i = 0; i < splitIndices.length; i++) {
+        assertEquals(i * emptyHeaderSize, offsets[i]);
         // total size of payload, should be just 4 bytes for the row count
         assertEquals(4, bb.getInt());
         // row count should be zero
@@ -51,11 +49,21 @@ public class ShuffleSplitAssembleTest {
 
   @Test
   void testEmptyRoundTrip() {
+    int[] meta = new int[]{DType.DTypeEnum.INT32.getNativeId(), 0};
     int[] splitIndices = new int[]{0, 0, 0};
     try (ColumnVector c0 = ColumnVector.fromInts();
          Table t = new Table(c0);
-         HostTable ht = HostTable.fromTable(t, Cuda.DEFAULT_STREAM)) {
-
+         HostTable htin = HostTable.fromTable(t, Cuda.DEFAULT_STREAM);
+         HostSplitResult sr = ShuffleSplitAssemble.splitOnHost(htin, splitIndices)) {
+      // build offsets with partition total size skipped
+      long[] offsets = new long[sr.getOffsets().length];
+      for (int i = 0; i < offsets.length; i++) {
+        offsets[i] = sr.getOffsets()[i] + 4;
+      }
+      try (HostTable htout = ShuffleSplitAssemble.concatToHostTable(meta, sr.getBuffer(), offsets);
+           Table actual = htout.toTable()) {
+        AssertUtils.assertTablesAreEqual(t, actual);
+      }
     }
   }
 
