@@ -705,12 +705,15 @@ void copy_validity_part(cudf::bitmask_type* dest, cudf::bitmask_type const* src,
 {
   if (dest_start_bit > 0) {
     if (num_bits < NULL_MASK_WORD_BITS - dest_start_bit) {
-      *dest |= (*src & ((1 << num_bits) - 1)) << dest_start_bit;
+      auto mask = (1 << num_bits) - 1;
+      auto shifted_mask = mask << dest_start_bit;
+      *dest = (*dest & ~shifted_mask) | ((*src & mask) << dest_start_bit);
     } else {
       // TODO: consider adding SSE/AVX/NEON versions of this
       static_assert(NULL_MASK_WORD_BITS == 32, "bitmask shifted copy needs update");
       uint64_t bits = static_cast<uint64_t>(*src++) << dest_start_bit;
-      *dest++ |= static_cast<cudf::bitmask_type>(bits);
+      *dest = (*dest & ~((1 << dest_start_bit) - 1)) | static_cast<cudf::bitmask_type>(bits);
+      dest += 1;
       num_bits -= NULL_MASK_WORD_BITS - dest_start_bit;
       while (num_bits >= NULL_MASK_WORD_BITS) {
         bits >>= 32;

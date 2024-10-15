@@ -49,7 +49,6 @@ public class ShuffleSplitAssembleTest {
 
   @Test
   void testEmptyRoundTrip() {
-    int[] meta = new int[]{DType.DTypeEnum.INT32.getNativeId(), 0};
     int[] splitIndices = new int[]{0, 0, 0};
     try (ColumnVector c0 = ColumnVector.fromInts();
          Table t = new Table(c0);
@@ -60,6 +59,7 @@ public class ShuffleSplitAssembleTest {
       for (int i = 0; i < offsets.length; i++) {
         offsets[i] = sr.getOffsets()[i] + 4;
       }
+      int[] meta = new int[]{DType.DTypeEnum.INT32.getNativeId(), 0};
       try (HostTable htout = ShuffleSplitAssemble.concatToHostTable(meta, sr.getBuffer(), offsets);
            Table actual = htout.toTable()) {
         AssertUtils.assertTablesAreEqual(t, actual);
@@ -134,6 +134,25 @@ public class ShuffleSplitAssembleTest {
       assertEquals(0, bb.getInt());
 
       assertEquals(0, bb.remaining());
+    }
+  }
+
+  @Test
+  void testSimpleRoundTrip() {
+    int[] splitIndices = new int[]{0, 3, 3, 5};
+    try (Table t = new Table.TestBuilder().column(7, 9, 1, null, -1, -4).build();
+         HostTable htin = HostTable.fromTable(t, Cuda.DEFAULT_STREAM);
+         HostSplitResult sr = ShuffleSplitAssemble.splitOnHost(htin, splitIndices)) {
+      // build offsets with partition total size skipped
+      long[] offsets = new long[sr.getOffsets().length];
+      for (int i = 0; i < offsets.length; i++) {
+        offsets[i] = sr.getOffsets()[i] + 4;
+      }
+      int[] meta = new int[]{DType.DTypeEnum.INT32.getNativeId(), 0};
+      try (HostTable htout = ShuffleSplitAssemble.concatToHostTable(meta, sr.getBuffer(), offsets);
+           Table actual = htout.toTable()) {
+        AssertUtils.assertTablesAreEqual(t, actual);
+      }
     }
   }
 }
