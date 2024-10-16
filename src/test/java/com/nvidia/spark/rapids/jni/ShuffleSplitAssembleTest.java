@@ -48,7 +48,7 @@ public class ShuffleSplitAssembleTest {
   }
 
   @Test
-  void testEmptyRoundTrip() {
+  void testEmptyRoundTripHost() {
     int[] splitIndices = new int[]{0, 0, 0};
     try (ColumnVector c0 = ColumnVector.fromInts();
          Table t = new Table(c0);
@@ -68,7 +68,7 @@ public class ShuffleSplitAssembleTest {
   }
 
   @Test
-  void testSimpleSplit() {
+  void testSimpleSplitHost() {
     int[] splitIndices = new int[]{0, 3, 3, 5};
     try (Table t = new Table.TestBuilder().column(7, 9, 1, null, -1, -4).build();
          HostTable ht = HostTable.fromTable(t, Cuda.DEFAULT_STREAM);
@@ -138,7 +138,7 @@ public class ShuffleSplitAssembleTest {
   }
 
   //@Test
-  void testSimpleRoundTrip() {
+  void testSimpleRoundTripHost() {
     int[] splitIndices = new int[]{0, 3, 3, 5};
     try (Table t = new Table.TestBuilder().column(7, 9, 1, null, -1, -4).build();
          HostTable htin = HostTable.fromTable(t, Cuda.DEFAULT_STREAM);
