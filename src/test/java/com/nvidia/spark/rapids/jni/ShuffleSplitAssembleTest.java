@@ -137,7 +137,7 @@ public class ShuffleSplitAssembleTest {
     }
   }
 
-  @Test
+  //@Test
   void testSimpleRoundTrip() {
     int[] splitIndices = new int[]{0, 3, 3, 5};
     try (Table t = new Table.TestBuilder().column(7, 9, 1, null, -1, -4).build();

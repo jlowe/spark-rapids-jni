@@ -70,8 +70,8 @@ public class ShuffleSplitAssemble {
     }
   }
 
-  public static DeviceSplitResult splitOnDevice(int[] metadata, Table table, int[] splitIndices) {
-    long[] result = splitOnDevice(metadata, table.getNativeView(), splitIndices);
+  public static DeviceSplitResult splitOnDevice(Table table, int[] splitIndices) {
+    long[] result = splitOnDevice(table.getNativeView(), splitIndices);
     assert(result.length == 6);
     long bufferAddr = result[0];
     long bufferSize = result[1];
@@ -146,7 +146,7 @@ public class ShuffleSplitAssemble {
     return hmb.getInt(partOffset);
   }
 
-  private static native long[] splitOnDevice(int[] metadata, long table, int[] splitIndices);
+  private static native long[] splitOnDevice(long table, int[] splitIndices);
   private static native long[] assembleOnDevice(int[] metadata, long partsAddr, long partsSize,
                                                 long partOffsetsAddr, long partOffsetsCount);
   private static native long splitOnHostSize(long host_table_handle, int[] splitIndices);

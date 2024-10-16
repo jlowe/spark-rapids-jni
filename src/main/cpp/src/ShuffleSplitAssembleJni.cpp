@@ -16,6 +16,7 @@
 
 #include "cudf_jni_apis.hpp"
 #include "host_table_view.hpp"
+#include "shuffle_split.hpp"
 
 #include <cudf/lists/lists_column_view.hpp>
 #include <cudf/strings/strings_column_view.hpp>
@@ -29,48 +30,6 @@
 #include <limits>
 #include <tuple>
 #include <vector>
-
-//====================
-//temporary declarations until headers are available
-#include <cudf/types.hpp>
-namespace spark_rapids_jni {
-struct shuffle_split_col_data {
-  cudf::data_type dtype;
-  cudf::size_type num_children;
-};
-
-struct shuffle_split_metadata {
-  // depth-first traversal
-  // - a fixed column or strings have 0
-  // - a list column always has 1 (I guess we could also make this
-  //   0 to make it more string-like. in my brain I always think of lists
-  //   as explicitly having a child because the type is completely arbitrary)
-  // - structs have N
-  //
-  std::vector<shuffle_split_col_data> col_info{};
-};
-struct shuffle_split_result {
-  // packed partition buffers. very similar to what would have come out of
-  // contiguous_split, except:
-  // - it is one big buffer where all of the partitions are glued together instead
-  //   of one buffer per-partition
-  // - each partition is prepended by some data-dependent info: row count, presence-of-validity
-  // etc
-  std::unique_ptr<rmm::device_buffer>    partitions;
-  // offsets into the partition buffer for each partition. offsets.size() will be
-  // num partitions
-  std::unique_ptr<rmm::device_uvector<size_t>>   offsets;
-};
-shuffle_split_result shuffle_split(cudf::table_view const& input,
-                        shuffle_split_metadata const& global_metadata,
-                        std::vector<cudf::size_type> const& splits,
-                        rmm::cuda_stream_view stream,
-                        rmm::device_async_resource_ref mr);
-std::unique_ptr<cudf::table> shuffle_assemble(shuffle_split_metadata const& global_metadata,
-                                              cudf::device_span<int8_t const> partitions,
-                                              cudf::device_span<size_t const> partition_offsets);
-}
-//====================
 
 namespace {
 
@@ -103,24 +62,8 @@ spark_rapids_jni::shuffle_split_metadata to_metadata(JNIEnv* env, jintArray jmet
   result.reserve(metadata.size());
   for (int i = 0; i < metadata.size(); i += 2) {
     auto type_id = static_cast<cudf::type_id>(metadata[i]);
-    cudf::data_type dtype(type_id);
-    auto num_children = 0;
-    switch (type_id) {
-      case cudf::type_id::STRUCT:
-        num_children = metadata[i + 1];
-        break;
-      case cudf::type_id::LIST:
-        num_children = 1;
-        break;
-      case cudf::type_id::DECIMAL32: [[fallthrough]];
-      case cudf::type_id::DECIMAL64: [[fallthrough]];
-      case cudf::type_id::DECIMAL128:
-        dtype = cudf::data_type(type_id, metadata[i + 1]);
-        break;
-      default:
-        break;
-    }
-    result.push_back({dtype, num_children});
+    auto num_children = static_cast<cudf::size_type>(metadata[i+1]);
+    result.push_back({type_id, {num_children}});
   }
   metadata.cancel();
   return spark_rapids_jni::shuffle_split_metadata{std::move(result)};
@@ -940,14 +883,14 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemb
   try {
     cudf::jni::auto_set_device(env);
     auto const table = reinterpret_cast<cudf::table_view const*>(jtable);
-    auto metadata = to_metadata(env, jmeta);
     cudf::jni::native_jintArray indices(env, jsplit_indices);
-    auto split_result = spark_rapids_jni::shuffle_split(*table, metadata, indices.to_vector(),
-                                                        cudf::get_default_stream(),
-                                                        rmm::mr::get_current_device_resource());
+    auto [split_result, split_metadata] =
+      spark_rapids_jni::shuffle_split(*table, indices.to_vector(),
+                                      cudf::get_default_stream(),
+                                      rmm::mr::get_current_device_resource());
     indices.cancel();
     cudf::jni::native_jlongArray result(env, 6);
-    auto offsets_buffer = std::make_unique<rmm::device_buffer>(split_result.offsets->release());
+    auto offsets_buffer = std::make_unique<rmm::device_buffer>(split_result.offsets.release());
     result[0] = cudf::jni::ptr_as_jlong(split_result.partitions->data());
     result[1] = split_result.partitions->size();
     result[2] = cudf::jni::release_as_jlong(split_result.partitions);
@@ -973,7 +916,9 @@ JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemb
     auto const offsets_ptr = reinterpret_cast<size_t const*>(offsets_addr);
     cudf::device_span<size_t const> offsets_span{offsets_ptr, static_cast<size_t>(offsets_count)};
     auto meta = to_metadata(env, jmeta);
-    auto table = spark_rapids_jni::shuffle_assemble(meta, parts_span, offsets_span);
+    auto table = spark_rapids_jni::shuffle_assemble(meta, parts_span, offsets_span,
+                                                    cudf::get_default_stream(),
+                                                    rmm::mr::get_current_device_resource());
     return cudf::jni::convert_table_for_return(env, table);
   }
   CATCH_STD(env, nullptr);

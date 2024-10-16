@@ -55,7 +55,9 @@
 
 #include "shuffle_split.hpp"
 
-namespace cudf::spark_rapids_jni {
+namespace spark_rapids_jni {
+
+using namespace cudf;
 
 namespace {
 
@@ -3461,4 +3463,4 @@ std::unique_ptr<table> shuffle_assemble(shuffle_split_metadata const& global_met
   return build_table(h_column_info, dst_buffers, stream, mr);
 }
 
-};  // namespace cudf::spark_rapids_jni
+}  // namespace spark_rapids_jni

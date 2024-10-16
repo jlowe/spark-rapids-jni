@@ -25,10 +25,10 @@ struct ShuffleSplitTests : public cudf::test::BaseFixture {};
 
 void run_split(cudf::table_view const& tbl, std::vector<cudf::size_type> const& splits)
 {    
-  auto [split_data, split_metadata] = cudf::spark_rapids_jni::shuffle_split(tbl,
-                                                                            splits,
-                                                                            cudf::get_default_stream(),
-                                                                            rmm::mr::get_current_device_resource());
+  auto [split_data, split_metadata] = spark_rapids_jni::shuffle_split(tbl,
+                                                                      splits,
+                                                                      cudf::get_default_stream(),
+                                                                      rmm::mr::get_current_device_resource());
   auto result = shuffle_assemble(split_metadata,
                                 {static_cast<int8_t*>(split_data.partitions->data()), split_data.partitions->size()},
                                 split_data.offsets,

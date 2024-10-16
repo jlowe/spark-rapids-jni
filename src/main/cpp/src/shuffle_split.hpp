@@ -21,7 +21,7 @@
 
 #include <vector>
 
-namespace cudf::spark_rapids_jni {
+namespace spark_rapids_jni {
 
 static constexpr std::size_t shuffle_split_partition_data_align = 16;
 
@@ -109,4 +109,4 @@ std::unique_ptr<cudf::table> shuffle_assemble(shuffle_split_metadata const& meta
                                               rmm::cuda_stream_view stream,
                                               rmm::device_async_resource_ref mr);
 
-} // namespace cudf::spark_rapids_jni
+} // namespace spark_rapids_jni
