@@ -216,10 +216,12 @@ add_library(
   src/from_json_to_raw_map.cu
   src/get_json_object.cu
   src/histogram.cu
+  src/json_utils.cu
   src/murmur_hash.cu
   src/parse_uri.cu
   src/regex_rewrite_utils.cu
   src/row_conversion.cu
+  src/shuffle_split.cu
   src/substring_index.cu
   src/timezones.cu
   src/utilities.cu
