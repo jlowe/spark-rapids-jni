@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids.jni;
 
 import ai.rapids.cudf.*;
+import com.nvidia.spark.rapids.jni.ShuffleSplitAssemble.DeviceSplitResult;
 import com.nvidia.spark.rapids.jni.ShuffleSplitAssemble.HostSplitResult;
 import org.junit.jupiter.api.Test;
 
@@ -25,6 +26,37 @@ import java.nio.ByteBuffer;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class ShuffleSplitAssembleTest {
+  //@Test
+  void testEmptySplitGpu() {
+    int[] splitIndices = new int[]{0, 0, 0};
+    try (ColumnVector c0 = ColumnVector.fromInts();
+         Table t = new Table(c0);
+         DeviceSplitResult sr = ShuffleSplitAssemble.splitOnDevice(t, splitIndices)) {
+      DeviceMemoryBuffer devOffsets = sr.getOffsets();
+      DeviceMemoryBuffer devBuffer = sr.getBuffer();
+      assertEquals(splitIndices.length * 4, devOffsets.getLength());
+      int emptyPartitionSize = 16;
+      assertEquals(splitIndices.length * emptyPartitionSize, devBuffer.getLength());
+      try (HostMemoryBuffer offsetsBuffer = copyToHost(devOffsets);
+           HostMemoryBuffer buffer = copyToHost(devBuffer)) {
+        ByteBuffer offsets = offsetsBuffer.asByteBuffer();
+        ByteBuffer data = buffer.asByteBuffer();
+        for (int i = 0; i < splitIndices.length; i++) {
+          assertEquals(i * emptyPartitionSize, offsets.getLong());
+          // row count
+          assertEquals(0, data.getInt());
+          // has validity mask
+          assertEquals(0, data.getInt());
+          // padding to 16 bytes
+          assertEquals(0, data.getInt());
+          assertEquals(0, data.getInt());
+        }
+        assertEquals(0, offsets.remaining());
+        assertEquals(0, data.remaining());
+      }
+    }
+  }
+
   @Test
   void testEmptySplitHost() {
     int[] splitIndices = new int[]{0, 0, 0};
@@ -63,6 +95,82 @@ public class ShuffleSplitAssembleTest {
       try (HostTable htout = ShuffleSplitAssemble.concatToHostTable(meta, sr.getBuffer(), offsets);
            Table actual = htout.toTable()) {
         AssertUtils.assertTablesAreEqual(t, actual);
+      }
+    }
+  }
+
+  @Test
+  void testSimpleSplitNoNullsGpu() {
+    int[] splitIndices = new int[]{3, 3, 5, 6};
+    try (Table t = new Table.TestBuilder().column(7, 9, 1, -10, -1, -4).build();
+         DeviceSplitResult sr = ShuffleSplitAssemble.splitOnDevice(t, splitIndices)) {
+      DeviceMemoryBuffer devOffsets = sr.getOffsets();
+      DeviceMemoryBuffer devBuffer = sr.getBuffer();
+      assertEquals((splitIndices.length + 1) * Long.BYTES, devOffsets.getLength());
+      try (HostMemoryBuffer offsetsBuffer = copyToHost(devOffsets);
+           HostMemoryBuffer buffer = copyToHost(devBuffer)) {
+        ByteBuffer offsets = offsetsBuffer.asByteBuffer();
+        ByteBuffer data = buffer.asByteBuffer();
+        System.out.print("OFFSETS: ");
+        debug(offsets);
+        System.out.print("DATA: ");
+        debug(data);
+        // Check partition 0
+        assertEquals(0, offsets.getLong());
+        // row count
+        assertEquals(3, data.getInt());
+        // no columns with nulls
+        assertEquals(0, data.getInt());
+        // padding to 16 bytes
+        assertEquals(0, data.getLong());
+        // data values
+        assertEquals(7, data.getInt());
+        assertEquals(9, data.getInt());
+        assertEquals(1, data.getInt());
+        // padding to a multiple of 16 bytes
+        assertEquals(0, data.getInt());
+        // Check partition 1
+        assertEquals(data.position(), offsets.getLong());
+        // row count
+        assertEquals(0, data.getInt());
+        // padding to 16 bytes
+        assertEquals(0, data.getInt());
+        assertEquals(0, data.getLong());
+        // Check partition 2
+        assertEquals(data.position(), offsets.getLong());
+        // row count
+        assertEquals(2, data.getInt());
+        // no columns with nulls
+        assertEquals(0, data.getInt());
+        // padding to 16 bytes
+        assertEquals(0, data.getLong());
+        // data values, skip null checks since they could be anything
+        assertEquals(-10, data.getInt());
+        assertEquals(-1, data.getInt());
+        // padding to 16 bytes
+        assertEquals(0, data.getLong());
+        // Check partition 3
+        assertEquals(data.position(), offsets.getLong());
+        // row count
+        assertEquals(1, data.getInt());
+        // no columns with nulls
+        assertEquals(0, data.getInt());
+        // padding to 16 bytes
+        assertEquals(0, data.getLong());
+        // data values padded to 16 bytes
+        assertEquals(-4, data.getInt());
+        assertEquals(0, data.getInt());
+        assertEquals(0, data.getLong());
+        // Check partition 4
+        assertEquals(data.position(), offsets.getLong());
+        // row count
+        assertEquals(0, data.getInt());
+        // padding to 16 bytes
+        assertEquals(0, data.getInt());
+        assertEquals(0, data.getLong());
+        // verify all values have been examined
+        assertEquals(0, offsets.remaining());
+        assertEquals(0, data.remaining());
       }
     }
   }
@@ -137,6 +245,20 @@ public class ShuffleSplitAssembleTest {
     }
   }
 
+  @Test
+  void testSimpleRoundTripNoNullsGpu() {
+    int[] splitIndices = new int[]{3, 3, 5, 6};
+    try (Table t = new Table.TestBuilder().column(7, 9, 1, -10, -1, -4).build();
+         DeviceSplitResult sr = ShuffleSplitAssemble.splitOnDevice(t, splitIndices)) {
+      int[] meta = new int[]{DType.DTypeEnum.INT32.getNativeId(), 0};
+      DeviceMemoryBuffer offsets = sr.getOffsets();
+      DeviceMemoryBuffer data = sr.getBuffer();
+      try (Table result = ShuffleSplitAssemble.assembleOnDevice(meta, data, offsets)) {
+        AssertUtils.assertTablesAreEqual(t, result);
+      }
+    }
+  }
+
   //@Test
   void testSimpleRoundTripHost() {
     int[] splitIndices = new int[]{0, 3, 3, 5};
@@ -154,5 +276,22 @@ public class ShuffleSplitAssembleTest {
         AssertUtils.assertTablesAreEqual(t, actual);
       }
     }
+  }
+
+  private HostMemoryBuffer copyToHost(DeviceMemoryBuffer buffer) {
+    try (HostMemoryBuffer hmb = HostMemoryBuffer.allocate(buffer.getLength())) {
+      hmb.copyFromDeviceBuffer(buffer);
+      hmb.incRefCount();
+      return hmb;
+    }
+  }
+
+  private void debug(ByteBuffer bb) {
+    bb.mark();
+    while (bb.hasRemaining()) {
+      System.out.print(Integer.toHexString(bb.getInt()) + " ");
+    }
+    System.out.println();
+    bb.reset();
   }
 }
