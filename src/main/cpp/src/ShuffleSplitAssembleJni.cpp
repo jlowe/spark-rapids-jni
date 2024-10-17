@@ -478,10 +478,6 @@ update_column_concat_meta(std::vector<column_concat_meta>& meta, int num_rows,
   column_meta.num_rows += num_rows;
   bool has_validity = has_nulls_mask != nullptr &&
     has_nulls_mask[column_index / 32] & (1 << column_index);
-  if (has_nulls_mask) {
-    std::cerr << "*has_nulls_mask: " << std::hex << *has_nulls_mask << std::endl;
-  }
-  std::cerr << "column " << column_index << " has validity: " << has_validity << std::endl;
   if (has_validity) {
     column_meta.has_nulls = true;
     buffer += pad_size((num_rows + 7)/8);
@@ -558,7 +554,6 @@ std::vector<column_concat_meta> build_column_concat_meta(cudf::jni::native_jintA
     auto word_ptr = reinterpret_cast<uint32_t const*>(part_buffer);
     auto num_rows = *word_ptr++;
     auto has_nulls_mask = num_rows == 0 ? nullptr : word_ptr;
-    std::cerr << "offset " << offset << " row count: " << num_rows << std::endl;
     // move past header
     part_buffer += pad_size(4 + (total_columns + 7)/8);
     int column_index = 0;
@@ -629,7 +624,6 @@ to_column_concat_tracker(column_concat_meta const& m, uint8_t* bp, uint8_t* bp_e
   if (bp > bp_end) {
     throw std::logic_error("buffer overrun");
   }
-  std::cerr << "column null mask: " << null_mask << std::endl;
   return std::make_pair(column_concat_tracker(m.dtype, m.num_children, null_mask, offsets, data), bp);
 }
 
@@ -794,19 +788,14 @@ cudf::size_type count_nulls(cudf::bitmask_type const* validity, int num_rows)
   cudf::size_type null_count = 0;
   int num_whole_words = num_rows / NULL_MASK_WORD_BITS;
   for (int i = 0; i < num_whole_words; i++) {
-    std::cerr << "count_zeroes full word: " << std::hex << validity[i];
     null_count += count_zeros(validity[i]);
-    std::cerr << " null count: " << null_count << std::endl;
   }
   auto remaining_rows = num_rows % NULL_MASK_WORD_BITS;
   if (remaining_rows != 0) {
-    std::cerr << "count_zeroes partial word: " << std::hex << validity[num_whole_words];
     cudf::bitmask_type bits = validity[num_whole_words];
     // set all the bits that don't correspond to valid rows to 1
     bits |= ~((1 << remaining_rows) - 1);
-    std::cerr << " count_zeroes bits: " << std::hex << bits;
     null_count += count_zeros(bits);
-    std::cerr << " null count: " << null_count << std::endl;
   }
   return null_count;
 }
@@ -876,10 +865,10 @@ std::unique_ptr<host_table_view> concat_to_host_table(std::vector<column_concat_
 extern "C" {
 
 JNIEXPORT jlongArray JNICALL Java_com_nvidia_spark_rapids_jni_ShuffleSplitAssemble_splitOnDevice(
-  JNIEnv* env, jclass, jintArray jmeta, jlong jtable, jintArray jsplit_indices)
+  JNIEnv* env, jclass, jlong jtable, jintArray jsplit_indices)
 {
-  JNI_NULL_CHECK(env, jmeta, "metadata is null", nullptr);
   JNI_NULL_CHECK(env, jtable, "input table is null", nullptr);
+  JNI_NULL_CHECK(env, jsplit_indices, "indices is null", nullptr);
   try {
     cudf::jni::auto_set_device(env);
     auto const table = reinterpret_cast<cudf::table_view const*>(jtable);

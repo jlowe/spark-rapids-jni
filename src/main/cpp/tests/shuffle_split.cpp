@@ -28,12 +28,12 @@ void run_split(cudf::table_view const& tbl, std::vector<cudf::size_type> const& 
   auto [split_data, split_metadata] = spark_rapids_jni::shuffle_split(tbl,
                                                                       splits,
                                                                       cudf::get_default_stream(),
-                                                                      rmm::mr::get_current_device_resource());
-  auto result = shuffle_assemble(split_metadata,
-                                {static_cast<int8_t*>(split_data.partitions->data()), split_data.partitions->size()},
-                                split_data.offsets,
-                                cudf::get_default_stream(),
-                                rmm::mr::get_current_device_resource());
+                                                                      cudf::get_current_device_resource());
+  auto result = spark_rapids_jni::shuffle_assemble(split_metadata,
+                                                   {static_cast<int8_t*>(split_data.partitions->data()), split_data.partitions->size()},
+                                                   split_data.offsets,
+                                                   cudf::get_default_stream(),
+                                                   cudf::get_current_device_resource());
   CUDF_TEST_EXPECT_TABLES_EQUAL(tbl, *result);
 }
 
@@ -98,7 +98,6 @@ TEST_F(ShuffleSplitTests, EmptyInputs)
   run_split(tbl, {});
 }
 
-/*
 TEST_F(ShuffleSplitTests, Struct)
 {  
   cudf::size_type const num_rows = 10000;
@@ -129,4 +128,3 @@ TEST_F(ShuffleSplitTests, Struct)
     run_split(tbl, {10, 100, 2756, 7777});
   }
 }
-*/
