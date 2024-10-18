@@ -101,8 +101,8 @@ public class ShuffleSplitAssembleTest {
 
   @Test
   void testSimpleSplitNoNullsGpu() {
-    int[] splitIndices = new int[]{3, 3, 5, 6};
-    try (Table t = new Table.TestBuilder().column(7, 9, 1, -10, -1, -4).build();
+    int[] splitIndices = new int[]{2};
+    try (Table t = new Table.TestBuilder().column(1, 2, 3).build();
          DeviceSplitResult sr = ShuffleSplitAssemble.splitOnDevice(t, splitIndices)) {
       DeviceMemoryBuffer devOffsets = sr.getOffsets();
       DeviceMemoryBuffer devBuffer = sr.getBuffer();

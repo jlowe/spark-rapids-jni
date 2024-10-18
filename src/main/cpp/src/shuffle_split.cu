@@ -380,7 +380,7 @@ template <typename InputIter>
 std::size_t compute_offset_stack_size(InputIter begin, InputIter end, int offset_depth = 0)
 {
   return std::accumulate(begin, end, 0, [offset_depth](auto stack_size, column_view const& col) {
-    auto const num_buffers = 1 + (col.nullable() ? 1 : 0);
+    auto const num_buffers = 1 + (col.has_nulls() ? 1 : 0);
     return stack_size + (offset_depth * num_buffers) +
            compute_offset_stack_size(
              col.child_begin(), col.child_end(), offset_depth + is_offset_type(col.type().id()));
@@ -404,7 +404,7 @@ template <typename InputIter, typename OutputIter>
 OutputIter setup_src_buf_data(InputIter begin, InputIter end, OutputIter out_buf)
 {
   std::for_each(begin, end, [&out_buf](column_view const& col) {
-    if (col.nullable()) {
+    if (col.has_nulls()) {
       *out_buf = reinterpret_cast<uint8_t const*>(col.null_mask());
       out_buf++;
     }
@@ -439,7 +439,7 @@ size_type count_src_bufs(InputIter begin, InputIter end)
 {
   auto buf_iter = thrust::make_transform_iterator(begin, [](column_view const& col) {
     auto const children_counts = count_src_bufs(col.child_begin(), col.child_end());
-    return 1 + (col.nullable() ? 1 : 0) + children_counts;
+    return 1 + (col.has_nulls() ? 1 : 0) + children_counts;
   });
   return std::accumulate(buf_iter, buf_iter + std::distance(begin, end), 0);
 }
@@ -497,7 +497,7 @@ struct buf_info_functor {
   {
     auto start = current;
 
-    if (col.nullable()) {
+    if (col.has_nulls()) {
       std::tie(current, offset_stack_pos) =
         add_null_buffer(col, current, offset_stack_pos, parent_offset_index, offset_depth);
     }
@@ -547,7 +547,7 @@ std::pair<src_buf_info*, size_type> buf_info_functor::operator()<cudf::string_vi
 {
   auto start = current;
 
-  if (col.nullable()) {
+  if (col.has_nulls()) {
     std::tie(current, offset_stack_pos) =
       add_null_buffer(col, current, offset_stack_pos, parent_offset_index, offset_depth);
   }
@@ -614,7 +614,7 @@ std::pair<src_buf_info*, size_type> buf_info_functor::operator()<cudf::list_view
   lists_column_view lcv(col);
   auto start = current;
 
-  if (col.nullable()) {
+  if (col.has_nulls()) {
     std::tie(current, offset_stack_pos) =
       add_null_buffer(col, current, offset_stack_pos, parent_offset_index, offset_depth);
   }
@@ -671,7 +671,7 @@ std::pair<src_buf_info*, size_type> buf_info_functor::operator()<cudf::struct_vi
 {
   auto start = current;
 
-  if (col.nullable()) {
+  if (col.has_nulls()) {
     std::tie(current, offset_stack_pos) =
       add_null_buffer(col, current, offset_stack_pos, parent_offset_index, offset_depth);
   }
@@ -757,7 +757,7 @@ std::tuple<size_type, int64_t, int64_t, size_type> build_output_column_metadata(
   bool use_src_null_count)
 {
   auto [bitmask_offset, null_count] = [&]() {
-    if (src.nullable()) {
+    if (src.has_nulls()) {
       // offsets in the existing serialized_column metadata are int64_t
       // that's the reason for the casting in this code.
       int64_t const bitmask_offset =
@@ -2599,7 +2599,7 @@ std::pair<shuffle_split_result, shuffle_split_metadata> shuffle_split(cudf::tabl
   CUDF_EXPECTS(std::all_of(input.begin(), input.end(), [](cudf::column_view const& col){
     return col.type().id() != cudf::type_id::STRING && 
            col.type().id() != cudf::type_id::LIST &&
-           !col.nullable();
+           !col.has_nulls();
   }), "Unsupported column type (for now)");
 
   // `temp_mr` is the same as `mr` for contiguous_split as it allocates all
