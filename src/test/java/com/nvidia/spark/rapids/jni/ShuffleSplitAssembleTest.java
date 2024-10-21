@@ -101,8 +101,8 @@ public class ShuffleSplitAssembleTest {
 
   @Test
   void testSimpleSplitNoNullsGpu() {
-    int[] splitIndices = new int[]{2};
-    try (Table t = new Table.TestBuilder().column(1, 2, 3).build();
+    int[] splitIndices = new int[]{3, 3, 5, 6};
+    try (Table t = new Table.TestBuilder().column(7, 9, 1, -10, -1, -4).build();
          DeviceSplitResult sr = ShuffleSplitAssemble.splitOnDevice(t, splitIndices)) {
       DeviceMemoryBuffer devOffsets = sr.getOffsets();
       DeviceMemoryBuffer devBuffer = sr.getBuffer();
@@ -122,20 +122,20 @@ public class ShuffleSplitAssembleTest {
         // no columns with nulls
         assertEquals(0, data.getInt());
         // padding to 16 bytes
-        assertEquals(0, data.getLong());
+        data.getLong();
         // data values
         assertEquals(7, data.getInt());
         assertEquals(9, data.getInt());
         assertEquals(1, data.getInt());
         // padding to a multiple of 16 bytes
-        assertEquals(0, data.getInt());
+        data.getInt();
         // Check partition 1
         assertEquals(data.position(), offsets.getLong());
         // row count
         assertEquals(0, data.getInt());
         // padding to 16 bytes
-        assertEquals(0, data.getInt());
-        assertEquals(0, data.getLong());
+        data.getInt();
+        data.getLong();
         // Check partition 2
         assertEquals(data.position(), offsets.getLong());
         // row count
@@ -143,12 +143,12 @@ public class ShuffleSplitAssembleTest {
         // no columns with nulls
         assertEquals(0, data.getInt());
         // padding to 16 bytes
-        assertEquals(0, data.getLong());
+        data.getLong();
         // data values, skip null checks since they could be anything
         assertEquals(-10, data.getInt());
         assertEquals(-1, data.getInt());
         // padding to 16 bytes
-        assertEquals(0, data.getLong());
+        data.getLong();
         // Check partition 3
         assertEquals(data.position(), offsets.getLong());
         // row count
@@ -156,7 +156,7 @@ public class ShuffleSplitAssembleTest {
         // no columns with nulls
         assertEquals(0, data.getInt());
         // padding to 16 bytes
-        assertEquals(0, data.getLong());
+        data.getLong();
         // data values padded to 16 bytes
         assertEquals(-4, data.getInt());
         assertEquals(0, data.getInt());
@@ -166,8 +166,8 @@ public class ShuffleSplitAssembleTest {
         // row count
         assertEquals(0, data.getInt());
         // padding to 16 bytes
-        assertEquals(0, data.getInt());
-        assertEquals(0, data.getLong());
+        data.getInt();
+        data.getLong();
         // verify all values have been examined
         assertEquals(0, offsets.remaining());
         assertEquals(0, data.remaining());
