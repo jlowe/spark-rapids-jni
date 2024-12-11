@@ -23,9 +23,9 @@ echo "Running $0, to rerun outside Maven with the same parameters invoke
 
 $ ./build/run-in-docker
 
-Inside docker 
+Inside docker run
 
-REUSE_ENV=true $0
+$ REUSE_ENV=true $0
 "
 
 set -e
