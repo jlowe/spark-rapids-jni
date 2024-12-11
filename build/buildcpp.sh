@@ -19,11 +19,33 @@
 # Script to build native code in cudf and spark-rapids-jni
 #
 
-set -ex
+echo "Running $0, to rerun outside Maven with the same parameters invoke
 
-# Environment variables to control the build
+$ ./build/run-in-docker
+
+Inside docker 
+
+REUSE_ENV=true $0
+"
+
+set -e
 PROJECT_BASE_DIR=${PROJECT_BASE_DIR:-$(realpath $(dirname $0)/..)}
 PROJECT_BUILD_DIR=${PROJECT_BUILD_DIR:-$PROJECT_BASE_DIR/target}
+BUILD_FAULTINJ=${BUILD_FAULTINJ:-ON}
+export CMAKE_GENERATOR=${CMAKE_GENERATOR:-"Ninja"}
+
+
+# Set env for arm64 build, The possible values of 'uname -m' : [x86_64/i386/aarch64/mips/...]
+if [ "$(uname -m)" == "aarch64" ]; then
+  USE_GDS="OFF" # The GDS cuFiles RDMA libraries are not included in the arm64 CUDA toolkit.
+  BUILD_FAULTINJ="OFF" # libcupti_static.a linked by cufaultinj, does not exist in the arm64 CUDA toolkit.
+fi
+
+if [[ "$REUSE_ENV" != "true" ]]; then
+  echo "
+CMAKE_GENERATOR=${CMAKE_GENERATOR}
+PROJECT_BASE_DIR=${PROJECT_BASE_DIR}
+PROJECT_BUILD_DIR=${PROJECT_BUILD_DIR}
 BUILD_BENCHMARKS=${BUILD_BENCHMARKS:-ON}
 BUILD_CUDF_BENCHMARKS=${BUILD_CUDF_BENCHMARKS:-OFF}
 BUILD_CUDF_TESTS=${BUILD_CUDF_TESTS:-OFF}
@@ -43,7 +65,10 @@ LIBCUDF_INSTALL_PATH=${LIBCUDF_INSTALL_PATH:-$PROJECT_BUILD_DIR/libcudf-install}
 LIBCUDFJNI_BUILD_PATH=${LIBCUDFJNI_BUILD_PATH:-$PROJECT_BUILD_DIR/libcudfjni}
 SPARK_JNI_BUILD_PATH=${SPARK_JNI_BUILD_PATH:-$PROJECT_BUILD_DIR/jni/cmake-build}
 RMM_LOGGING_LEVEL=${RMM_LOGGING_LEVEL:-OFF}
-USE_GDS=${USE_GDS:-OFF}
+USE_GDS=${USE_GDS:-OFF}" > ${PROJECT_BUILD_DIR}/buildcpp-env.sh
+fi
+
+source ${PROJECT_BUILD_DIR}/buildcpp-env.sh
 
 #
 # libcudf build
